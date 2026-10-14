@@ -60,7 +60,7 @@ func TestTestKeymapIsClean(t *testing.T) {
 }
 
 func TestFooterOrdersByPriorityAndPinsLast(t *testing.T) {
-	got := testKeymap().Footer([]Ctx{ctxList, ctxGlobal}, 200, nil, FooterStyle{})
+	got := testKeymap().Footer([]Ctx{ctxList, ctxGlobal}, 200, Opts{}, FooterStyle{})
 	want := "j down  k up  enter open  d delete  r refresh  ? help  q quit"
 	if got != want {
 		t.Fatalf("footer =\n%q\nwant\n%q", got, want)
@@ -70,7 +70,7 @@ func TestFooterOrdersByPriorityAndPinsLast(t *testing.T) {
 func TestFooterShowsOnlyUnshadowedKeys(t *testing.T) {
 	// enter belongs to list.open; in the modal, q is claimed by modal.close,
 	// so quit is advertised by its other key.
-	got := testKeymap().Footer([]Ctx{ctxModal, ctxGlobal}, 200, nil, FooterStyle{})
+	got := testKeymap().Footer([]Ctx{ctxModal, ctxGlobal}, 200, Opts{}, FooterStyle{})
 	if !strings.Contains(got, "ctrl+c quit") || strings.Contains(got, "q quit") {
 		t.Fatalf("footer = %q; quit must be shown by a key that still reaches it", got)
 	}
@@ -79,7 +79,7 @@ func TestFooterShowsOnlyUnshadowedKeys(t *testing.T) {
 func TestFooterDropsLowPriorityKeepsPinned(t *testing.T) {
 	km := testKeymap()
 	for w := 1; w <= 80; w++ {
-		got := km.Footer([]Ctx{ctxList, ctxGlobal}, w, nil, FooterStyle{})
+		got := km.Footer([]Ctx{ctxList, ctxGlobal}, w, Opts{}, FooterStyle{})
 		if ansi.StringWidth(got) > w {
 			t.Fatalf("width %d: footer is %d cells: %q", w, ansi.StringWidth(got), got)
 		}
@@ -87,14 +87,14 @@ func TestFooterDropsLowPriorityKeepsPinned(t *testing.T) {
 			t.Fatalf("width %d: pinned hint dropped: %q", w, got)
 		}
 	}
-	got := km.Footer([]Ctx{ctxList, ctxGlobal}, 30, nil, FooterStyle{})
+	got := km.Footer([]Ctx{ctxList, ctxGlobal}, 30, Opts{}, FooterStyle{})
 	if !strings.Contains(got, "…") || strings.Contains(got, "refresh") {
 		t.Fatalf("narrow footer = %q; want refresh dropped first and … shown", got)
 	}
 }
 
 func TestFooterHidesDisabled(t *testing.T) {
-	got := testKeymap().Footer([]Ctx{ctxList, ctxGlobal}, 200, func(a string) bool { return a != "list.delete" }, FooterStyle{})
+	got := testKeymap().Footer([]Ctx{ctxList, ctxGlobal}, 200, Opts{Enabled: func(a string) bool { return a != "list.delete" }}, FooterStyle{})
 	if strings.Contains(got, "delete") {
 		t.Fatalf("footer = %q; disabled action advertised", got)
 	}
@@ -107,14 +107,14 @@ func TestFooterWideRunes(t *testing.T) {
 		Binding{Action: "quit", Keys: []string{"q"}, Ctx: ctxList, Help: "종료", Pinned: true},
 	)
 	for w := 0; w <= 40; w++ {
-		if got := km.Footer([]Ctx{ctxList}, w, nil, FooterStyle{Separator: " | "}); ansi.StringWidth(got) > w {
+		if got := km.Footer([]Ctx{ctxList}, w, Opts{}, FooterStyle{Separator: " | "}); ansi.StringWidth(got) > w {
 			t.Fatalf("width %d: %q is %d cells", w, got, ansi.StringWidth(got))
 		}
 	}
 }
 
 func TestHelpGroupsInContextOrder(t *testing.T) {
-	secs := testKeymap().Help([]Ctx{ctxList, ctxGlobal})
+	secs := testKeymap().Help(Opts{}, []Ctx{ctxList, ctxGlobal})
 	var titles []string
 	for _, s := range secs {
 		titles = append(titles, s.Title)
@@ -128,35 +128,35 @@ func TestHelpGroupsInContextOrder(t *testing.T) {
 }
 
 func TestRenderHelpCutsHonestly(t *testing.T) {
-	secs := testKeymap().Help([]Ctx{ctxList, ctxGlobal})
-	full := RenderHelp(secs, 40, 100, 0)
+	secs := testKeymap().Help(Opts{}, []Ctx{ctxList, ctxGlobal})
+	full := RenderHelp(secs, 40, 100, 0, HelpStyle{})
 	if len(full) != 12 { // 3 titles + 7 entries + 2 blank separators
 		t.Fatalf("full help is %d lines:\n%s", len(full), strings.Join(full, "\n"))
 	}
-	cut := RenderHelp(secs, 40, 5, 0)
+	cut := RenderHelp(secs, 40, 5, 0, HelpStyle{})
 	if len(cut) != 5 || !strings.HasPrefix(cut[4], "… ") || !strings.HasSuffix(cut[4], "more") {
 		t.Fatalf("cut = %q", cut)
 	}
 	if want := len(full) - 4; !strings.Contains(cut[4], strconv.Itoa(want)) {
 		t.Fatalf("cut says %q, want %d more", cut[4], want)
 	}
-	for _, l := range RenderHelp(secs, 12, 100, 0) {
+	for _, l := range RenderHelp(secs, 12, 100, 0, HelpStyle{}) {
 		if ansi.StringWidth(l) > 12 {
 			t.Fatalf("line %q exceeds width", l)
 		}
 	}
-	scrolled := RenderHelp(secs, 40, 100, 1000)
+	scrolled := RenderHelp(secs, 40, 100, 1000, HelpStyle{})
 	if len(scrolled) != 1 {
 		t.Fatalf("offset past the end must clamp to the last line, got %q", scrolled)
 	}
-	if RenderHelp(secs, 0, 10, 0) != nil || RenderHelp(secs, 10, 0, 0) != nil {
+	if RenderHelp(secs, 0, 10, 0, HelpStyle{}) != nil || RenderHelp(secs, 10, 0, 0, HelpStyle{}) != nil {
 		t.Fatal("zero size renders nothing")
 	}
 }
 
 func TestPaletteEntriesAndFilter(t *testing.T) {
 	km := testKeymap()
-	es := km.Entries([]Ctx{ctxList, ctxGlobal}, func(a string) bool { return a != "refresh" })
+	es := km.Entries([]Ctx{ctxList, ctxGlobal}, Opts{Enabled: func(a string) bool { return a != "refresh" }})
 	for _, e := range es {
 		if e.Action == "refresh" {
 			t.Fatal("disabled action offered in the palette")

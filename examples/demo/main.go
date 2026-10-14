@@ -147,7 +147,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, m.loadDetail())
 	case tea.KeyMsg:
 		m.toasts = toast.OnKey(m.toasts)
-		b, ok := m.km.Resolve(m.active(), msg, m.enabled)
+		b, ok := m.km.Resolve(m.active(), msg, keys.Opts{Enabled: m.enabled})
 		if !ok {
 			return m, nil
 		}
@@ -220,7 +220,7 @@ func (m model) View() string {
 	if m.w < 40 || m.h < 8 {
 		return render.FitLines("terminal too small", m.w, m.h)
 	}
-	footer := m.km.Footer(m.active(), m.w, m.enabled, m.th.FooterStyle())
+	footer := m.km.Footer(m.active(), m.w, keys.Opts{Enabled: m.enabled}, m.th.FooterStyle())
 	toasts := toast.View(m.toasts, m.w, m.th.ToastStyles())
 	bodyH := m.bodyHeight(toasts)
 	listW := min(30, m.w/2)
@@ -241,7 +241,7 @@ func (m model) View() string {
 		return frame
 	}
 	boxW, boxH := min(50, m.w-4), min(16, m.h-4)
-	lines := keys.RenderHelp(m.km.Help([]keys.Ctx{ctxList, ctxGlobal}), boxW-4, boxH-2, m.helpOff)
+	lines := keys.RenderHelp(m.km.Help(keys.Opts{}, []keys.Ctx{ctxList, ctxGlobal}), boxW-4, boxH-2, m.helpOff, m.th.HelpStyle())
 	box := m.th.BoxFocus.Render(strings.Join(lines, "\n"))
 	return render.Center(render.Dim(frame), box, m.w, m.h) // over, not instead of (E8)
 }

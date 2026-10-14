@@ -9,7 +9,8 @@ import (
 )
 
 // FooterStyle styles the footer. The zero value renders plain text with two
-// spaces between hints, which is what NO_COLOR wants anyway.
+// spaces between hints and word key names, which is what NO_COLOR wants
+// anyway.
 type FooterStyle struct {
 	Key  lipgloss.Style // the key ("q")
 	Desc lipgloss.Style // the description ("quit")
@@ -18,18 +19,28 @@ type FooterStyle struct {
 	// Asian ambiguous and render two cells on some CJK terminals, which would
 	// push a footer measured as fitting past the edge (gcl hints.go).
 	Separator string
+	Names     Names // how keys are displayed
+}
+
+// hint is one footer entry: a binding, or a FooterGroup of them.
+type hint struct {
+	keys   []string
+	label  string
+	prio   int
+	pinned bool
 }
 
 // Footer renders the one-line hint bar for the active contexts.
 //
-// Hints come from bindings with Footer > 0 or Pinned, enabled, and not
-// shadowed by an inner context. Unpinned hints are ordered by Footer (lower
-// first) and dropped from the high-number end until the line fits; pinned
-// hints (quit, help) go last and are never dropped, because they are how a
-// user finds the keys that did not fit (argx view_chrome.go, gcl hints.go).
-// When anything was dropped, `…` says so. The result never exceeds width
-// cells; if even the pinned hints do not fit, the line is truncated.
-func (km Keymap) Footer(active []Ctx, width int, enabled func(string) bool, st FooterStyle) string {
+// Hints come from bindings with Footer > 0 or Pinned that o.Enabled and
+// o.Visible both allow and that no inner context shadows. Bindings sharing a
+// FooterGroup collapse into one hint. Unpinned hints are ordered by Footer
+// (lower first) and dropped from the high-number end until the line fits;
+// pinned hints (quit, help) go last and are never dropped, because they are
+// how a user finds the keys that did not fit (argx view_chrome.go, gcl
+// hints.go). When anything was dropped, `…` says so. The result never exceeds
+// width cells; if even the pinned hints do not fit, the line is truncated.
+func (km Keymap) Footer(active []Ctx, width int, o Opts, st FooterStyle) string {
 	if width <= 0 {
 		return ""
 	}
@@ -37,35 +48,56 @@ func (km Keymap) Footer(active []Ctx, width int, enabled func(string) bool, st F
 	if sep == "" {
 		sep = "  "
 	}
-	var body, pinned []Binding
-	for _, b := range km.visible(active, enabled) {
-		switch {
-		case b.Pinned:
-			pinned = append(pinned, b)
-		case b.Footer > 0:
-			body = append(body, b)
+	var hints []hint
+	at := map[string]int{}
+	for _, s := range km.reachable(active, o.Enabled) {
+		b := s.Binding
+		if (!b.Pinned && b.Footer <= 0) || !o.visible(b.Action) {
+			continue
+		}
+		if i, ok := at[b.FooterGroup]; ok && b.FooterGroup != "" {
+			h := &hints[i]
+			h.keys = append(h.keys, b.Key())
+			h.prio = min(h.prio, b.Footer)
+			h.pinned = h.pinned || b.Pinned
+			continue
+		}
+		h := hint{keys: []string{b.Key()}, label: b.Label(o.State), prio: b.Footer, pinned: b.Pinned}
+		if b.FooterGroup != "" {
+			h.label = b.FooterGroup
+			at[b.FooterGroup] = len(hints)
+		}
+		hints = append(hints, h)
+	}
+	var body, pinned []hint
+	for _, h := range hints {
+		if h.pinned {
+			pinned = append(pinned, h)
+		} else {
+			body = append(body, h)
 		}
 	}
 	// Stable, so equal priorities keep innermost-context-first order.
-	sort.SliceStable(body, func(i, j int) bool { return body[i].Footer < body[j].Footer })
-	sort.SliceStable(pinned, func(i, j int) bool { return pinned[i].Footer < pinned[j].Footer })
+	sort.SliceStable(body, func(i, j int) bool { return body[i].prio < body[j].prio })
+	sort.SliceStable(pinned, func(i, j int) bool { return pinned[i].prio < pinned[j].prio })
 
-	hint := func(b Binding) string {
-		if b.Help == "" {
-			return st.Key.Render(b.Key())
+	draw := func(h hint) string {
+		k := st.Key.Render(st.Names.Join(h.keys))
+		if h.label == "" {
+			return k
 		}
-		return st.Key.Render(b.Key()) + " " + st.Desc.Render(b.Help)
+		return k + " " + st.Desc.Render(h.label)
 	}
 	render := func(n int) string {
 		parts := make([]string, 0, n+len(pinned)+1)
-		for _, b := range body[:n] {
-			parts = append(parts, hint(b))
+		for _, h := range body[:n] {
+			parts = append(parts, draw(h))
 		}
 		if n < len(body) {
 			parts = append(parts, st.More.Render("…"))
 		}
-		for _, b := range pinned {
-			parts = append(parts, hint(b))
+		for _, h := range pinned {
+			parts = append(parts, draw(h))
 		}
 		return strings.Join(parts, sep)
 	}

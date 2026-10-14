@@ -17,7 +17,8 @@ const (
 	// Shadowed: an inner context binds a key that a Pinned binding (quit,
 	// help) uses in an outer context, so the footer promises "q quit" while q
 	// does something else there. Ordinary inner-over-outer overriding (esc in
-	// a modal) is the point of contexts and is not reported.
+	// a modal) is the point of contexts and is not reported, and neither is
+	// a binding that lists the pinned action in its Shadows.
 	Shadowed
 	// Unreachable: a bare uppercase letter a 2-set Korean input source cannot
 	// produce (see ReachableUnderCJK). Apps that do not care can filter it out.
@@ -64,7 +65,9 @@ func (c Conflict) String() string {
 //
 // Duplicate and Unreachable need no context information. Shadowing depends on
 // which contexts can be active together, which only the app knows, so it is
-// checked for each stack passed (innermost first, as for Resolve).
+// checked for each stack passed (innermost first, as for Resolve). A shadow
+// the app intends is declared on the inner binding (Binding.Shadows), not
+// filtered out of this list: the test then stays the plain loop above.
 //
 // The spec named this Conflicts() with no arguments; the stacks were added
 // because a Keymap has no notion of context nesting otherwise.
@@ -120,7 +123,7 @@ func (km Keymap) shadows(stacks [][]Ctx) []Conflict {
 					for inner := 0; inner < outer; inner++ {
 						for _, i := range km.index[stack[inner]][k] {
 							hider := km.bindings[i]
-							if hider.Action == b.Action {
+							if hider.Action == b.Action || slices.Contains(hider.Shadows, b.Action) {
 								continue
 							}
 							id := fmt.Sprint(k, stack[inner], hider.Action, b.Ctx, b.Action)
