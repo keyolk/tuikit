@@ -3,18 +3,30 @@ package main
 import (
 	"io"
 	"log"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/keyolk/tuikit/keys"
+	"github.com/keyolk/tuikit/list"
 	"github.com/keyolk/tuikit/prefs"
 	"github.com/keyolk/tuikit/theme"
 	"github.com/keyolk/tuikit/toast"
+	"github.com/keyolk/tuikit/tuitest"
 )
+
+func TestMain(m *testing.M) {
+	for _, k := range []string{"LC_ALL", "LC_CTYPE", "RUNEWIDTH_EASTASIAN"} {
+		os.Unsetenv(k)
+	}
+	os.Setenv("LANG", "en_US.UTF-8")
+	os.Exit(m.Run())
+}
 
 // The pattern every app using keys should copy: the binding table is checked
 // in a test, for every context stack the app can be in.
@@ -30,27 +42,39 @@ func testModel(t *testing.T) model {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var items []item
 	for i := 0; i < 30; i++ {
-		items = append(items, item{ID: string(rune('a' + i)), Name: "서비스 " + string(rune('a'+i))})
+		items = append(items, item{id: string(rune('a' + i)), name: "서비스 " + string(rune('a'+i))})
 	}
 	m := model{
 		km: keymap(), th: theme.NewWith(lipgloss.NewRenderer(io.Discard), theme.DefaultRoles(), theme.Unicode()),
-		logf: log.New(io.Discard, "", 0).Printf, items: items, selID: "a", toasts: toast.New(3),
+		logf: log.New(io.Discard, "", 0).Printf, all: items, rows: list.New(items), toasts: toast.New(3),
 		saver: prefs.NewSaver[uiState](app, time.Hour),
 	}
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 14})
 	return next.(model)
 }
 
-func press(m model, k string) model {
-	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
+func keyMsg(k string) tea.KeyMsg {
 	switch k {
 	case "esc":
-		msg = tea.KeyMsg{Type: tea.KeyEsc}
+		return tea.KeyMsg{Type: tea.KeyEsc}
+	case "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}
 	case "ctrl+c":
-		msg = tea.KeyMsg{Type: tea.KeyCtrlC}
+		return tea.KeyMsg{Type: tea.KeyCtrlC}
+	case "ctrl+d":
+		return tea.KeyMsg{Type: tea.KeyCtrlD}
+	case "backspace":
+		return tea.KeyMsg{Type: tea.KeyBackspace}
 	}
-	next, _ := m.Update(msg)
-	return next.(model)
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
+}
+
+func press(m model, ks ...string) model {
+	for _, k := range ks {
+		next, _ := m.Update(keyMsg(k))
+		m = next.(model)
+	}
+	return m
 }
 
 func assertFits(t *testing.T, m model) {
@@ -71,8 +95,8 @@ func TestDemoNavigatesUnderKoreanLayoutAndStaysInFrame(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		m = press(m, "ㅓ") // physical j
 	}
-	if m.selID != string(rune('a'+20)) {
-		t.Fatalf("selID = %q after 20 downs", m.selID)
+	if m.rows.SelectedID() != string(rune('a'+20)) {
+		t.Fatalf("selected %q after 20 downs", m.rows.SelectedID())
 	}
 	assertFits(t, m)
 	m = press(m, "x") // error toast
@@ -100,14 +124,101 @@ func TestStaleDetailIsDropped(t *testing.T) {
 	}
 }
 
-func TestFooterFollowsWrapState(t *testing.T) {
+func TestFooterFollowsStateAndLiveLabels(t *testing.T) {
 	m := testModel(t)
-	if f := m.km.Footer(m.active(), 200, m.keyOpts(), keys.FooterStyle{}); !strings.Contains(f, "w wrap") || !strings.Contains(f, "jk move") {
+	f := m.km.Footer(m.active(), 200, m.keyOpts(), keys.FooterStyle{})
+	if !strings.Contains(f, "w wrap") || !strings.Contains(f, "jk move") || !strings.Contains(f, "1-9 jump") {
 		t.Fatalf("footer = %q", f)
 	}
-	m = press(m, "w")
-	if f := m.km.Footer(m.active(), 200, m.keyOpts(), keys.FooterStyle{}); !strings.Contains(f, "w unwrap") {
-		t.Fatalf("footer = %q after w", f)
+	m = press(m, "w", "/", "서", "enter")
+	f = m.km.Footer(m.active(), 200, m.keyOpts(), keys.FooterStyle{})
+	if !strings.Contains(f, "w unwrap") || !strings.Contains(f, "/ filter: 서") || !strings.Contains(f, "jk move in matches") {
+		t.Fatalf("footer = %q after w and a filter", f)
+	}
+}
+
+func TestFilterTypesKoreanAndKeepsTheCursorOnItsItem(t *testing.T) {
+	m := testModel(t)
+	m = press(m, "j", "j") // on c
+	m = press(m, "/")
+	// q and ? are text here, and jamo are not normalized to shortcuts.
+	m = press(m, "q")
+	if !m.filtering || m.query != "q" {
+		t.Fatalf("q must be typed into the filter: filtering=%v query=%q", m.filtering, m.query)
+	}
+	m = press(m, "backspace", "서비스 c")
+	if m.rows.SelectedID() != "c" || m.rows.Len() == 0 {
+		t.Fatalf("filtered to %d rows, cursor on %q", m.rows.Len(), m.rows.SelectedID())
+	}
+	assertFits(t, m)
+	m = press(m, "esc")
+	if m.filtering || m.query != "" || m.rows.Len() != 30 || m.rows.SelectedID() != "c" {
+		t.Fatalf("esc must clear the filter and keep the cursor: %q on %q", m.query, m.rows.SelectedID())
+	}
+	// ctrl+c still quits from inside the field.
+	m = press(m, "/")
+	if _, cmd := m.Update(keyMsg("ctrl+c")); cmd == nil {
+		t.Fatal("ctrl+c must quit while typing")
+	}
+}
+
+func TestReverseAndJumpKeepIDAnchoring(t *testing.T) {
+	m := testModel(t)
+	m = press(m, "5") // 5 tenths of 30 → row 15
+	if m.rows.SelectedID() != string(rune('a'+15)) {
+		t.Fatalf("jump selected %q", m.rows.SelectedID())
+	}
+	m = press(m, "S")
+	if m.rows.SelectedID() != string(rune('a'+15)) || m.rows.Index() != 14 {
+		t.Fatalf("reverse moved the cursor off its item: %q at %d", m.rows.SelectedID(), m.rows.Index())
+	}
+	m = press(m, "G")
+	if m.rows.Index() != 29 {
+		t.Fatal("G goes to the last row")
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	if m = next.(model); m.rows.Index() >= 29 {
+		t.Fatal("ctrl+u moves half a page up")
+	}
+}
+
+func TestRefreshShowsProgressThenResult(t *testing.T) {
+	m := testModel(t)
+	next, cmd := m.Update(keyMsg("r"))
+	m = next.(model)
+	if it := m.toasts.Items(); len(it) != 1 || it[0].Level != toast.Progress {
+		t.Fatalf("toasts = %+v", it)
+	}
+	// The fetch is a 400ms tick; Drain waits for it and skips nothing else.
+	var fetched tea.Msg
+	for _, msg := range tuitest.Drain(cmd, time.Second) {
+		if _, ok := msg.(fetchedMsg); ok {
+			fetched = msg
+		}
+	}
+	if fetched == nil {
+		t.Fatal("refresh produced no fetch result")
+	}
+	next, _ = m.Update(fetched)
+	m = next.(model)
+	if it := m.toasts.Items(); len(it) != 1 || it[0].Level != toast.Success || it[0].Text != "refreshed" {
+		t.Fatalf("the result must replace the progress toast: %+v", it)
+	}
+	if f := m.km.Footer(m.active(), 200, m.keyOpts(), keys.FooterStyle{}); !strings.Contains(f, "r refresh (1)") {
+		t.Fatalf("live label missing: %q", f)
+	}
+}
+
+func TestFooterShowsPositionFlushRight(t *testing.T) {
+	m := testModel(t)
+	m = press(m, "j")
+	last := strings.Split(m.View(), "\n")
+	footer := last[len(last)-1]
+	if !strings.HasSuffix(ansi.Strip(footer), " 2/30") {
+		t.Fatalf("footer = %q", footer)
+	}
+	if lipgloss.Width(footer) != m.w {
+		t.Fatalf("footer is %d cells, want %d", lipgloss.Width(footer), m.w)
 	}
 }
 
@@ -140,14 +251,17 @@ func TestHelpOffsetStopsAtLastPage(t *testing.T) {
 		m = press(m, "j")
 	}
 	held := m.helpOff
-	if held > 50 {
-		t.Fatalf("help offset grew to %d on a held key", held)
+	if held == 0 || held > 50 {
+		t.Fatalf("help offset = %d after a held key", held)
 	}
 	m = press(m, "k")
-	if m.helpOff != max(0, held-1) {
+	if m.helpOff != held-1 {
 		t.Fatalf("one k moved the offset from %d to %d", held, m.helpOff)
 	}
 	assertFits(t, m)
+	if !strings.Contains(m.View(), "keys") {
+		t.Fatal("the help box has its title")
+	}
 	m = press(m, "q") // closes help, does not quit
 	if m.help {
 		t.Fatal("q must close help first")
