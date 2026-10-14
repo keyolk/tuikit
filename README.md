@@ -28,6 +28,7 @@ profile constant; it is already lipgloss's dependency.
 | `kitty` | Kitty graphics (Kitty, Ghostty, WezTerm, also behind tmux) with no package state. `Detect(env, tmux)` returns `Caps` (`Supported`, `Terminal`, `InTmux`, `NeedsPassthrough`, `PassthroughMode`, `Pane`) from an injected env and `TmuxQuerier`; the app calls it once in main and keeps the value. `EnsurePassthroughCmd` sets tmux `allow-passthrough=all` off the loop and returns its error. Escape builders are `Caps` methods, so tmux wrapping (ESC doubled, one frame per 4096-byte chunk) follows the value: `Transmit`/`TransmitImage`/`TransmitFile`/`TransmitShared`, `Place` (z-index, virtual `U=1`, cursor-saved `MoveTo` with pane offsets), `Delete`, `DeleteAll`. `Placeholder`/`PlaceholderAt` give U+10EEEE cells with the id in the foreground color and the row mark on the first cell only, so the image scrolls and clips with text inside tmux. `Fit` sizes a box by the cell's pixels (`CellSizeCmd`, `CellSizeQuery` + `ParseCellSize`); `KeyboardQuery` + `ParseKeyboardFlags` detect CSI u. `Image{ID, Source, Cols, Rows, Alt}`: `View` is exactly Cols×Rows cells, placeholders or the alt text; `Cmds(prev, …)` transmits on change and deletes on hide, encoding (shrunk to the box) inside the command; writes go through `Out`, one lock shared by copies. `QueryPane`/`WatchPane` run the tmux visibility poll as a command that is silent until something changes. | E1, E5, E9 |
 | `chart` | One-line charts whose lines are exactly `width` cells (`""` at width ≤ 0; widths 1-3 degrade, never overflow). `Sparkline`: 8-level ramp, resampled to the width by bucket `Mean` or `Max` (every cell covers an equal share), a short series pads rather than stretches unless `Stretch`, NaN is a gap, a constant series sits flat at mid-level, `Min`/`Max` fix the scale, `Last` marks the newest point. `Bar`/`Meter`: 1/8-cell fill (half-cell in ASCII), full only at 1, clamped; `Warn`/`Error` bands lead with ✓ ! ✗ (`v ! x`) so the band survives NO_COLOR; percent and label kept inside the width. `Timeline`: spans on a `[from,to)` row, exclusive ends, sub-cell spans keep one cell, overlaps merge into density levels on a shared `Peak`, overflow arrows, `Now`; `Ruler` labels follow the local clock and never overlap; `Lanes` groups spans by `Label` behind a cell-padded (Hangul-safe) column cut with the ellipsis. `Heat`: a day × hour grid on one scale, five levels, any non-zero cell visible. Glyphs carry the reading and theme roles (`LookFor(th)`) only color it. The Unicode set is block elements, which are East Asian Ambiguous, so `LookFor`/`DetectGlyphs` pick the equal-width ASCII set under a CJK locale. Options are values (glyph sets are arrays). | E7, E10, E11 |
 | `fuzzy` | The okx fzf-style scorer with smart case (`Score`, `Filter`, `Match`), used by the palette and public for app filters. | — |
+| `tmux` | `Client{Runner}` makes typed, context-aware tmux calls: `Panes(PaneFilter)` parses every free-text field (cwd, title, names, `@options`) by its byte length, so tabs, newlines and Hangul in them cannot shift a column. Also `PaneOptions(name)` (nil map with an error means tmux told us nothing; an empty map means no pane has the option), `Option`/`SetOption`/`UnsetOption` per pane/window/session/global scope (unset is not the same as empty), `ShowEnvironment`, `DisplayMessage`, `Current`, `Jump` (switch-client only across sessions, then select-window, then select-pane), `SendKeys`/`SendLiteral` (`-l --`)/`SendLine`/`SendKeyMsg` (`TeaKeyToTmux`: typed text and Korean are sent literally), `CapturePane`, `SplitWindow`/`NewWindow` (`-d -P -F #{pane_id}`; `Command{Argv}` or `{Shell}` with `ShellQuote`), `DisplayPopup` (exempt from the timeout), `KillPane`/`KillWindow`. Targets must be IDs (`%`/`@`/`$`); an index or an empty target is `ErrBadTarget`. Every call has a `…Cmd(gen, …)` that returns a typed Msg with `Gen` and `Err`. `New(env)` outside tmux runs nothing and returns `ErrNotInTmux`; the zero Client returns `ErrNoRunner` and never falls back to the real tmux. `ExecRunner` sets a timeout, puts tmux's stderr in the error, and takes `-L`/`-S` (socket pinned from `$TMUX`). `Fake` records argv and replays scripted replies. `Client.Run(args...)` is the raw escape hatch and makes a `Client` a `kitty.TmuxQuerier`, so one value serves both packages. `Procs` walks a `ps` snapshot from a pluggable source: `PaneOf` maps a PID behind wrappers to its pane, cycle-safe. | E5 |
 | `tuitest` | `Drain(cmd, wait)` runs a command batch or sequence and returns its messages without waiting on toast or saver timers. | — |
 
 ## Cell width: one rule
@@ -260,6 +261,22 @@ lanes := chart.Lanes(windows, dayStart, dayStart.AddDate(0, 0, 1), w,
 
 `examples/demo` wires every package into a list + detail app (the detail ends in a chart row): `go build ./examples/demo`.
 
+tmux calls never run inside Update; they come back as messages that carry a generation number:
+
+```go
+m.tm = tmux.New(nil) // outside tmux: every call returns ErrNotInTmux
+m.panesGen, id = m.panesGen.Next()
+return m, m.tm.PanesCmd(id, tmux.PaneFilter{Options: []string{"@cc_state"}})
+case tmux.PanesMsg:
+	if !m.panesGen.Is(msg.Gen) { return m, nil }
+	if msg.Err != nil { /* toast it */ }
+case tea.KeyMsg: // forwarding to a preview pane
+	return m, m.tm.SendKeyMsgCmd(0, m.previewPane, msg) // "한" is typed with -l, ctrl+c becomes C-c
+```
+
+In tests, use `tmux.Client{Runner: tmux.NewFake().On("list-panes", out, nil)}` and assert `f.Calls()`.
+`examples/tmuxpanes` lists panes and jumps to one: `go build ./examples/tmuxpanes`.
+
 ## Where the code came from
 
 | Piece | Source |
@@ -273,3 +290,8 @@ lanes := chart.Lanes(windows, dayStart, dayStart.AddDate(0, 0, 1), w,
 | kitty chunking, placeholders, payload shrinking, `Out` lock | ccproxy `internal/kitty`, `cmd/ccproxy/monitor_tui_detail.go`; diacritic table regenerated from Kitty's `rowcolumn-diacritics.txt` |
 | charts | ccproxy `renderSparkline` (max buckets, padding), ccx `stats_timeline.go` (ramp, mean buckets), narwhal `live.go` sparkline, gcl `timeline.go` (span cells, density, ruler, now, overflow), okx `refresh.go` (progress bar) |
 | styles, NO_COLOR, glyphs | dayx `styles.go`, okx `styles.go`, argx `glyphs.go` |
+| tmux panes, keys, capture, windows | ccx `internal/tmux/pane.go` (`ListPanes`, `SwitchToPane`, `TeaKeyToTmux`, `SendSingleKey`/`SendLiteralKeys`, `CapturePane`, `SpawnHiddenWindow`, `KillWindow`, `clientActiveWindow`), tmc `collect/tmux.rs` + `layout/restore.rs` (`-l --`, literal then Enter) |
+| tmux Cmds with generation and error | ccx PR #175/#176 (`pane_actions.go`, `tmux_async.go`, `worktree_async.go`) |
+| `@cc_pane_*` options, nil vs empty map | brd `internal/tui/actions.go`, `liveness.go` |
+| new window by ID, not by name; shell quoting | narwhal `cmd/narwhal/tmuxpanes.go` |
+| PID-to-pane walk | ccx `internal/tmux/live.go` (`walkToPane`, `batchPPIDMap`), `pane.go` (`procTree`) |
