@@ -26,6 +26,7 @@ profile constant; it is already lipgloss's dependency.
 | `prefs` | `$XDG_STATE_HOME/<app>/ui.json`; `Load` keeps defaults for missing fields and never mutates them; writes encode at call time and go temp-file-plus-rename with mode 0600, off the UI loop, reporting `Saved{Err}`. Every write carries a sequence number, so an older write never lands after a newer one. `Saver[T]` debounces bursts; `Flush`/`FlushWith(v)` write the latest state for quit (`Saved{Final: true}`); `SaveCmd` is the one-shot form. The zero `Saver` and app `""` persist nothing. | E12 |
 | `theme` | Colors by role (`Warn`, `Subtle`, `DiffAdded`…) as `AdaptiveColor`. NO_COLOR removes every color but keeps bold and reverse, so the selection stays visible. Unicode and ASCII glyph sets of equal widths (spinner frames, `Bar` glyphs included), chosen by locale or `<APP>_ASCII`; a CJK locale gets an ASCII `Ellipsis`. The zero `Theme` draws plain words. | E10, E11 |
 | `fuzzy` | The okx fzf-style scorer with smart case (`Score`, `Filter`, `Match`), used by the palette and public for app filters. | — |
+| `tmux` | `Client{Runner}` makes typed, context-aware tmux calls: `Panes(PaneFilter)` parses every free-text field (cwd, title, names, `@options`) by its byte length, so tabs, newlines and Hangul in them cannot shift a column. Also `PaneOptions(name)` (nil map with an error means tmux told us nothing; an empty map means no pane has the option), `Option`/`SetOption`/`UnsetOption` per pane/window/session/global scope (unset is not the same as empty), `ShowEnvironment`, `DisplayMessage`, `Current`, `Jump` (switch-client only across sessions, then select-window, then select-pane), `SendKeys`/`SendLiteral` (`-l --`)/`SendLine`/`SendKeyMsg` (`TeaKeyToTmux`: typed text and Korean are sent literally), `CapturePane`, `SplitWindow`/`NewWindow` (`-d -P -F #{pane_id}`; `Command{Argv}` or `{Shell}` with `ShellQuote`), `DisplayPopup` (exempt from the timeout), `KillPane`/`KillWindow`. Targets must be IDs (`%`/`@`/`$`); an index or an empty target is `ErrBadTarget`. Every call has a `…Cmd(gen, …)` that returns a typed Msg with `Gen` and `Err`. `New(env)` outside tmux runs nothing and returns `ErrNotInTmux`; the zero Client returns `ErrNoRunner` and never falls back to the real tmux. `ExecRunner` sets a timeout, puts tmux's stderr in the error, and takes `-L`/`-S` (socket pinned from `$TMUX`). `Fake` records argv and replays scripted replies. `Procs` walks a `ps` snapshot from a pluggable source: `PaneOf` maps a PID behind wrappers to its pane, cycle-safe. | E5 |
 | `tuitest` | `Drain(cmd, wait)` runs a command batch or sequence and returns its messages without waiting on toast or saver timers. | — |
 
 ## Cell width: one rule
@@ -230,6 +231,22 @@ msgs := tuitest.Drain(cmd, 0) // toast and saver ticks are skipped
 
 `examples/demo` wires every package into a list + detail app: `go build ./examples/demo`.
 
+tmux calls never run inside Update; they come back as messages that carry a generation number:
+
+```go
+m.tm = tmux.New(nil) // outside tmux: every call returns ErrNotInTmux
+m.panesGen, id = m.panesGen.Next()
+return m, m.tm.PanesCmd(id, tmux.PaneFilter{Options: []string{"@cc_state"}})
+case tmux.PanesMsg:
+	if !m.panesGen.Is(msg.Gen) { return m, nil }
+	if msg.Err != nil { /* toast it */ }
+case tea.KeyMsg: // forwarding to a preview pane
+	return m, m.tm.SendKeyMsgCmd(0, m.previewPane, msg) // "한" is typed with -l, ctrl+c becomes C-c
+```
+
+In tests, use `tmux.Client{Runner: tmux.NewFake().On("list-panes", out, nil)}` and assert `f.Calls()`.
+`examples/tmuxpanes` lists panes and jumps to one: `go build ./examples/tmuxpanes`.
+
 ## Where the code came from
 
 | Piece | Source |
@@ -240,3 +257,8 @@ msgs := tuitest.Drain(cmd, 0) // toast and saver ticks are skipped
 | overlay splice | argx `view_chrome.go` (`spliceOverlay`, dd1c8c9) |
 | truncate/pad | argx `render_util.go` |
 | styles, NO_COLOR, glyphs | dayx `styles.go`, okx `styles.go`, argx `glyphs.go` |
+| tmux panes, keys, capture, windows | ccx `internal/tmux/pane.go` (`ListPanes`, `SwitchToPane`, `TeaKeyToTmux`, `SendSingleKey`/`SendLiteralKeys`, `CapturePane`, `SpawnHiddenWindow`, `KillWindow`, `clientActiveWindow`), tmc `collect/tmux.rs` + `layout/restore.rs` (`-l --`, literal then Enter) |
+| tmux Cmds with generation and error | ccx PR #175/#176 (`pane_actions.go`, `tmux_async.go`, `worktree_async.go`) |
+| `@cc_pane_*` options, nil vs empty map | brd `internal/tui/actions.go`, `liveness.go` |
+| new window by ID, not by name; shell quoting | narwhal `cmd/narwhal/tmuxpanes.go` |
+| PID-to-pane walk | ccx `internal/tmux/live.go` (`walkToPane`, `batchPPIDMap`), `pane.go` (`procTree`) |
