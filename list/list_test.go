@@ -65,6 +65,12 @@ func TestReselectsByIDAfterReplace(t *testing.T) {
 	if l = l.SetItems(rows("p", "q")); l.SelectedID() != "p" {
 		t.Fatalf("from empty: %q", l.SelectedID())
 	}
+	// Filtered to nothing and back: the same item again.
+	l, _ = l.Select("q")
+	l = l.SetItems(nil).SetItems(rows("a", "q", "z"))
+	if l.SelectedID() != "q" {
+		t.Fatalf("through empty: %q", l.SelectedID())
+	}
 }
 
 func TestMovesAndWindow(t *testing.T) {

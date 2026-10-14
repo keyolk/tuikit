@@ -20,7 +20,9 @@ type Item interface{ ID() string }
 // is an empty list.
 type List[T Item] struct {
 	items  []T
-	id     string // the selected item's ID; "" when empty
+	// id is the selected item's ID. It survives an empty list, so a filter
+	// typed through "no match" and back lands on the same item.
+	id     string
 	idx    int    // its row, derived from id
 	off    int    // first visible row
 	height int    // rows the list draws items in
@@ -31,8 +33,9 @@ func New[T Item](items []T) List[T] { return List[T]{}.SetItems(items) }
 
 // SetItems replaces the items (copied) and keeps the selection by ID. When
 // the selected item is gone, the cursor stays on the same row, clamped —
-// the item that took its place — rather than jumping to the top. An empty
-// list before selects the first item.
+// the item that took its place — rather than jumping to the top. The ID is
+// remembered through an empty list: filtering down to nothing and back
+// reselects it.
 func (l List[T]) SetItems(items []T) List[T] {
 	l.items = append([]T(nil), items...)
 	if i := l.find(l.id); i >= 0 {
@@ -56,7 +59,7 @@ func (l List[T]) find(id string) int {
 // at selects row i (clamped) and scrolls minimally to keep it visible.
 func (l List[T]) at(i int) List[T] {
 	if len(l.items) == 0 {
-		l.id, l.idx, l.off = "", 0, 0
+		l.off = 0
 		return l
 	}
 	l.idx = max(0, min(i, len(l.items)-1))
@@ -89,7 +92,12 @@ func (l List[T]) Selected() (item T, ok bool) {
 
 // SelectedID is the selected item's ID, "" when empty. Persist this, not
 // Index (prefs).
-func (l List[T]) SelectedID() string { return l.id }
+func (l List[T]) SelectedID() string {
+	if len(l.items) == 0 {
+		return ""
+	}
+	return l.id
+}
 
 // Index is the selected row, -1 when empty.
 func (l List[T]) Index() int {
