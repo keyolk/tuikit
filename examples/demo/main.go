@@ -429,6 +429,9 @@ func (m model) View() string {
 		if m.wrap {
 			body = lipgloss.NewStyle().Width(m.w - listW - 1).Render(body)
 		}
+		if rows := m.chartRows(m.w - listW - 1); rows != "" {
+			body += "\n\n" + rows
+		}
 		return render.FitLines(body, m.w-listW-1, bodyH)
 	})
 	title := m.th.Title.Render(app)
