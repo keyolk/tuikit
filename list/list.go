@@ -19,13 +19,13 @@ type Item interface{ ID() string }
 // List is items plus a cursor held by ID and a scroll offset. The zero value
 // is an empty list.
 type List[T Item] struct {
-	items  []T
+	items []T
 	// id is the selected item's ID. It survives an empty list, so a filter
 	// typed through "no match" and back lands on the same item.
 	id     string
-	idx    int    // its row, derived from id
-	off    int    // first visible row
-	height int    // rows the list draws items in
+	idx    int // its row, derived from id
+	off    int // first visible row
+	height int // rows the list draws items in
 }
 
 // New returns a list of a copy of items with the first selected.
