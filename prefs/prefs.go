@@ -43,12 +43,15 @@ func Path(app string) string {
 // (added in a newer version) keep their defaults. A missing file returns def
 // and a nil error. A corrupt file returns def and the error; the caller
 // decides whether to tell the user — losing UI state should never stop the
-// app from starting.
+// app from starting. app "" means persistence is off: def, nil.
 //
 // def is deep-copied (through JSON) before the file is decoded over it:
 // decoding straight into a copy of def would write into the very maps and
 // slices def points at, changing the caller's defaults.
 func Load[T any](app string, def T) (T, error) {
+	if app == "" {
+		return def, nil
+	}
 	data, err := os.ReadFile(Path(app))
 	if errors.Is(err, os.ErrNotExist) {
 		return def, nil
@@ -87,11 +90,15 @@ type Saved struct {
 }
 
 // SaveCmd returns a command that writes v for app atomically with mode 0600.
+// app "" writes nothing and returns nil.
 //
 // v is encoded now, when SaveCmd is called from Update, not later when the
 // command runs: the command runs on another goroutine, and encoding there
 // would read maps the next Update may already be writing.
 func SaveCmd[T any](app string, v T) tea.Cmd {
+	if app == "" {
+		return nil
+	}
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		err = fmt.Errorf("prefs: encode: %w", err)

@@ -27,7 +27,12 @@ const DefaultDelay = 500 * time.Millisecond
 //		if msg.Final { return m, tea.Quit }
 //
 // and on every change call m.saver, cmd = m.saver.Save(m.uiState()); on quit
-// m.saver, cmd = m.saver.Flush() and quit on the Final Saved.
+// m.saver, cmd = m.saver.FlushWith(m.uiState()) and quit on the Final Saved.
+//
+// The zero Saver (and one for app "") persists nothing: Save and Update are
+// no-ops and Flush reports Final at once. A model literal in a test, or an
+// app run with persistence off, never writes $XDG_STATE_HOME/ui.json — which
+// is where app "" would otherwise land (brd, gcl).
 type Saver[T any] struct {
 	app   string
 	delay time.Duration
@@ -59,6 +64,9 @@ func (s Saver[T]) Pending() bool { return s.dirty }
 // encoding error is reported at once as Saved{Err} and the previous state is
 // kept.
 func (s Saver[T]) Save(v T) (Saver[T], tea.Cmd) {
+	if s.app == "" {
+		return s, nil
+	}
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		err = fmt.Errorf("prefs: encode: %w", err)
@@ -84,7 +92,7 @@ func (s Saver[T]) TickMsg() SaveTick { return SaveTick{app: s.app, gen: s.gen} }
 // ticks of another app's Saver, return s unchanged.
 func (s Saver[T]) Update(msg tea.Msg) (Saver[T], tea.Cmd) {
 	t, ok := msg.(SaveTick)
-	if !ok || t.app != s.app || t.gen != s.gen || !s.dirty {
+	if !ok || s.app == "" || t.app != s.app || t.gen != s.gen || !s.dirty {
 		return s, nil
 	}
 	s.dirty = false
@@ -99,9 +107,29 @@ func (s Saver[T]) Update(msg tea.Msg) (Saver[T], tea.Cmd) {
 func (s Saver[T]) Flush() (Saver[T], tea.Cmd) {
 	s.gen++ // a debounce tick still in flight finds a newer gen and does nothing
 	s.dirty = false
-	if s.data == nil {
+	if s.data == nil || s.app == "" {
 		app := s.app
 		return s, func() tea.Msg { return Saved{App: app, Final: true} }
 	}
 	return s, writeCmd(s.app, s.data, true)
+}
+
+// FlushWith records v and flushes it in one step, for quit: the model's
+// final state is usually not what the last Save saw. An encoding error is
+// reported as Saved{Err, Final: true}, so the app still quits — it keeps the
+// previous file and should log the error.
+func (s Saver[T]) FlushWith(v T) (Saver[T], tea.Cmd) {
+	if s.app == "" {
+		return s.Flush()
+	}
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		s.gen++
+		s.dirty = false
+		err = fmt.Errorf("prefs: encode: %w", err)
+		app := s.app
+		return s, func() tea.Msg { return Saved{App: app, Err: err, Final: true} }
+	}
+	s.data = append(data, '\n')
+	return s.Flush()
 }
