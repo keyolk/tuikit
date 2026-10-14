@@ -176,7 +176,18 @@ func (t Theme) ToastStyles() toast.Styles {
 	return toast.Styles{Info: t.Info, Success: t.Success, Warn: t.Warn, Error: t.Error, ASCII: t.Glyphs.ASCII}
 }
 
+// KeyNames is how keys are displayed: glyphs (enter → ↵, up → ↑) with the
+// Unicode glyph set, words with the ASCII one.
+func (t Theme) KeyNames() keys.Names {
+	return keys.Names{Glyphs: !t.Glyphs.ASCII}
+}
+
 // FooterStyle adapts the theme for keys.Keymap.Footer.
 func (t Theme) FooterStyle() keys.FooterStyle {
-	return keys.FooterStyle{Key: t.Key, Desc: t.Muted, More: t.Subtle}
+	return keys.FooterStyle{Key: t.Key, Desc: t.Muted, More: t.Subtle, Names: t.KeyNames()}
+}
+
+// HelpStyle adapts the theme for keys.RenderHelp.
+func (t Theme) HelpStyle() keys.HelpStyle {
+	return keys.HelpStyle{Title: t.Title, Key: t.Key, Desc: t.Text, Muted: t.Muted, Names: t.KeyNames()}
 }
