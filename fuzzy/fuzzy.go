@@ -3,6 +3,9 @@
 // Ported from okx (internal/fuzzy) and extended with tmc's smart case: a
 // pattern with an uppercase letter matches case-sensitively, so a user who
 // types "PR" can rule out "parser" without a separate toggle.
+//
+// It is public so pickers and CLIs outside the palette (okx's command line,
+// list filters) rank the same way the palette does.
 package fuzzy
 
 import (

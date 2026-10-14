@@ -8,7 +8,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/keyolk/tuikit/internal/fuzzy"
+	"github.com/keyolk/tuikit/fuzzy"
 )
 
 // Section is one group of the help screen.
