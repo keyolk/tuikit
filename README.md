@@ -26,6 +26,7 @@ profile constant; it is already lipgloss's dependency.
 | `prefs` | `$XDG_STATE_HOME/<app>/ui.json`; `Load` keeps defaults for missing fields and never mutates them; writes encode at call time and go temp-file-plus-rename with mode 0600, off the UI loop, reporting `Saved{Err}`. Every write carries a sequence number, so an older write never lands after a newer one. `Saver[T]` debounces bursts; `Flush`/`FlushWith(v)` write the latest state for quit (`Saved{Final: true}`); `SaveCmd` is the one-shot form. The zero `Saver` and app `""` persist nothing. | E12 |
 | `theme` | Colors by role (`Warn`, `Subtle`, `DiffAdded`…) as `AdaptiveColor`. NO_COLOR removes every color but keeps bold and reverse, so the selection stays visible. Unicode and ASCII glyph sets of equal widths (spinner frames, `Bar` glyphs included), chosen by locale or `<APP>_ASCII`; a CJK locale gets an ASCII `Ellipsis`. The zero `Theme` draws plain words. | E10, E11 |
 | `kitty` | Kitty graphics (Kitty, Ghostty, WezTerm, also behind tmux) with no package state. `Detect(env, tmux)` returns `Caps` (`Supported`, `Terminal`, `InTmux`, `NeedsPassthrough`, `PassthroughMode`, `Pane`) from an injected env and `TmuxQuerier`; the app calls it once in main and keeps the value. `EnsurePassthroughCmd` sets tmux `allow-passthrough=all` off the loop and returns its error. Escape builders are `Caps` methods, so tmux wrapping (ESC doubled, one frame per 4096-byte chunk) follows the value: `Transmit`/`TransmitImage`/`TransmitFile`/`TransmitShared`, `Place` (z-index, virtual `U=1`, cursor-saved `MoveTo` with pane offsets), `Delete`, `DeleteAll`. `Placeholder`/`PlaceholderAt` give U+10EEEE cells with the id in the foreground color and the row mark on the first cell only, so the image scrolls and clips with text inside tmux. `Fit` sizes a box by the cell's pixels (`CellSizeCmd`, `CellSizeQuery` + `ParseCellSize`); `KeyboardQuery` + `ParseKeyboardFlags` detect CSI u. `Image{ID, Source, Cols, Rows, Alt}`: `View` is exactly Cols×Rows cells, placeholders or the alt text; `Cmds(prev, …)` transmits on change and deletes on hide, encoding (shrunk to the box) inside the command; writes go through `Out`, one lock shared by copies. `QueryPane`/`WatchPane` run the tmux visibility poll as a command that is silent until something changes. | E1, E5, E9 |
+| `chart` | One-line charts whose lines are exactly `width` cells (`""` at width ≤ 0; widths 1-3 degrade, never overflow). `Sparkline`: 8-level ramp, resampled to the width by bucket `Mean` or `Max` (every cell covers an equal share), a short series pads rather than stretches unless `Stretch`, NaN is a gap, a constant series sits flat at mid-level, `Min`/`Max` fix the scale, `Last` marks the newest point. `Bar`/`Meter`: 1/8-cell fill (half-cell in ASCII), full only at 1, clamped; `Warn`/`Error` bands lead with ✓ ! ✗ (`v ! x`) so the band survives NO_COLOR; percent and label kept inside the width. `Timeline`: spans on a `[from,to)` row, exclusive ends, sub-cell spans keep one cell, overlaps merge into density levels on a shared `Peak`, overflow arrows, `Now`; `Ruler` labels follow the local clock and never overlap; `Lanes` groups spans by `Label` behind a cell-padded (Hangul-safe) column cut with the ellipsis. `Heat`: a day × hour grid on one scale, five levels, any non-zero cell visible. Glyphs carry the reading and theme roles (`LookFor(th)`) only color it. The Unicode set is block elements, which are East Asian Ambiguous, so `LookFor`/`DetectGlyphs` pick the equal-width ASCII set under a CJK locale. Options are values (glyph sets are arrays). | E7, E10, E11 |
 | `fuzzy` | The okx fzf-style scorer with smart case (`Score`, `Filter`, `Match`), used by the palette and public for app filters. | — |
 | `tuitest` | `Drain(cmd, wait)` runs a command batch or sequence and returns its messages without waiting on toast or saver timers. | — |
 
@@ -246,7 +247,18 @@ case kitty.Wrote:
 // View: m.img.View(m.caps) — exactly Cols×Rows cells; frame it, never truncate it
 ```
 
-`examples/demo` wires every package into a list + detail app: `go build ./examples/demo`.
+
+Charts take a `Look` from the theme and draw into a known width:
+
+```go
+look := chart.LookFor(m.th) // ASCII under ko/ja/zh, where blocks draw two cells
+row := chart.Sparkline(latencies, w-6, chart.SparkOpts{Look: look, Agg: chart.Max, Min: chart.Fixed(0), Last: true})
+disk := chart.Meter(56, 100, 22, chart.BarOpts{Look: look, Label: "/var"})   // "✓ ▕████▍   ▏  56% /var"
+lanes := chart.Lanes(windows, dayStart, dayStart.AddDate(0, 0, 1), w,
+	chart.TimelineOpts{Look: look, Now: time.Now(), Ruler: 3 * time.Hour}) // one row per Span.Label, then the ruler
+```
+
+`examples/demo` wires every package into a list + detail app (the detail ends in a chart row): `go build ./examples/demo`.
 
 ## Where the code came from
 
@@ -259,4 +271,5 @@ case kitty.Wrote:
 | truncate/pad | argx `render_util.go` |
 | kitty detection, passthrough, pane offset, `Fit` | ccx `internal/kitty/graphics.go`; visibility poll as a command from sendbird/ccx#175 (`kitty_watch.go`) |
 | kitty chunking, placeholders, payload shrinking, `Out` lock | ccproxy `internal/kitty`, `cmd/ccproxy/monitor_tui_detail.go`; diacritic table regenerated from Kitty's `rowcolumn-diacritics.txt` |
+| charts | ccproxy `renderSparkline` (max buckets, padding), ccx `stats_timeline.go` (ramp, mean buckets), narwhal `live.go` sparkline, gcl `timeline.go` (span cells, density, ruler, now, overflow), okx `refresh.go` (progress bar) |
 | styles, NO_COLOR, glyphs | dayx `styles.go`, okx `styles.go`, argx `glyphs.go` |

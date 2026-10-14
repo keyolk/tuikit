@@ -328,3 +328,22 @@ func TestPictureFallsBackToAltText(t *testing.T) {
 	}
 	assertFits(t, m)
 }
+
+// The chart row sits under the detail, inside the frame, and its reading
+// survives with color stripped.
+func TestDetailShowsAChartRow(t *testing.T) {
+	m := testModel(t)
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"load ", "disk ", "%", "◂"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view has no %q:\n%s", want, view)
+		}
+	}
+	assertFits(t, m)
+	t.Setenv("LANG", "ko_KR.UTF-8")
+	m.th = theme.NewWith(lipgloss.NewRenderer(io.Discard), theme.DefaultRoles(), theme.Unicode())
+	if view := ansi.Strip(m.View()); strings.Contains(view, "◂") || !strings.Contains(view, "<") {
+		t.Errorf("a CJK locale gets ASCII charts:\n%s", view)
+	}
+	assertFits(t, m)
+}

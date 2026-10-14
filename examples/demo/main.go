@@ -442,6 +442,9 @@ func (m model) View() string {
 		if m.wrap {
 			body = lipgloss.NewStyle().Width(m.w - listW - 1).Render(body)
 		}
+		if rows := m.chartRows(m.w - listW - 1); rows != "" {
+			body += "\n\n" + rows
+		}
 		// The picture's lines are exactly its box wide; only whole rows are
 		// cut, never a line, so the placeholder cells stay intact.
 		_, ph := m.pictureBox()
