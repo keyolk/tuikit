@@ -10,7 +10,7 @@ Every type works as a value inside a Bubble Tea model: nothing aliases across
 copies, and nothing captures the model in a closure.
 
 Dependencies: bubbletea v1.3.10, lipgloss v1.1.0, charmbracelet/x/ansi,
-gopkg.in/yaml.v3 (keymap overrides only). `muesli/termenv` is imported for its
+gopkg.in/yaml.v3 (keymap overrides only), golang.org/x/sys (`kitty` cell size only). `muesli/termenv` is imported for its
 profile constant; it is already lipgloss's dependency.
 
 ## Packages
@@ -25,6 +25,7 @@ profile constant; it is already lipgloss's dependency.
 | `async` | `Gen` drops superseded results; `Flight` adds an in-flight guard for polls. Both are plain values. | E5 |
 | `prefs` | `$XDG_STATE_HOME/<app>/ui.json`; `Load` keeps defaults for missing fields and never mutates them; writes encode at call time and go temp-file-plus-rename with mode 0600, off the UI loop, reporting `Saved{Err}`. Every write carries a sequence number, so an older write never lands after a newer one. `Saver[T]` debounces bursts; `Flush`/`FlushWith(v)` write the latest state for quit (`Saved{Final: true}`); `SaveCmd` is the one-shot form. The zero `Saver` and app `""` persist nothing. | E12 |
 | `theme` | Colors by role (`Warn`, `Subtle`, `DiffAdded`…) as `AdaptiveColor`. NO_COLOR removes every color but keeps bold and reverse, so the selection stays visible. Unicode and ASCII glyph sets of equal widths (spinner frames, `Bar` glyphs included), chosen by locale or `<APP>_ASCII`; a CJK locale gets an ASCII `Ellipsis`. The zero `Theme` draws plain words. | E10, E11 |
+| `kitty` | Kitty graphics (Kitty, Ghostty, WezTerm, also behind tmux) with no package state. `Detect(env, tmux)` returns `Caps` (`Supported`, `Terminal`, `InTmux`, `NeedsPassthrough`, `PassthroughMode`, `Pane`) from an injected env and `TmuxQuerier`; the app calls it once in main and keeps the value. `EnsurePassthroughCmd` sets tmux `allow-passthrough=all` off the loop and returns its error. Escape builders are `Caps` methods, so tmux wrapping (ESC doubled, one frame per 4096-byte chunk) follows the value: `Transmit`/`TransmitImage`/`TransmitFile`/`TransmitShared`, `Place` (z-index, virtual `U=1`, cursor-saved `MoveTo` with pane offsets), `Delete`, `DeleteAll`. `Placeholder`/`PlaceholderAt` give U+10EEEE cells with the id in the foreground color and the row mark on the first cell only, so the image scrolls and clips with text inside tmux. `Fit` sizes a box by the cell's pixels (`CellSizeCmd`, `CellSizeQuery` + `ParseCellSize`); `KeyboardQuery` + `ParseKeyboardFlags` detect CSI u. `Image{ID, Source, Cols, Rows, Alt}`: `View` is exactly Cols×Rows cells, placeholders or the alt text; `Cmds(prev, …)` transmits on change and deletes on hide, encoding (shrunk to the box) inside the command; writes go through `Out`, one lock shared by copies. `QueryPane`/`WatchPane` run the tmux visibility poll as a command that is silent until something changes. | E1, E5, E9 |
 | `chart` | One-line charts whose lines are exactly `width` cells (`""` at width ≤ 0; widths 1-3 degrade, never overflow). `Sparkline`: 8-level ramp, resampled to the width by bucket `Mean` or `Max` (every cell covers an equal share), a short series pads rather than stretches unless `Stretch`, NaN is a gap, a constant series sits flat at mid-level, `Min`/`Max` fix the scale, `Last` marks the newest point. `Bar`/`Meter`: 1/8-cell fill (half-cell in ASCII), full only at 1, clamped; `Warn`/`Error` bands lead with ✓ ! ✗ (`v ! x`) so the band survives NO_COLOR; percent and label kept inside the width. `Timeline`: spans on a `[from,to)` row, exclusive ends, sub-cell spans keep one cell, overlaps merge into density levels on a shared `Peak`, overflow arrows, `Now`; `Ruler` labels follow the local clock and never overlap; `Lanes` groups spans by `Label` behind a cell-padded (Hangul-safe) column cut with the ellipsis. `Heat`: a day × hour grid on one scale, five levels, any non-zero cell visible. Glyphs carry the reading and theme roles (`LookFor(th)`) only color it. The Unicode set is block elements, which are East Asian Ambiguous, so `LookFor`/`DetectGlyphs` pick the equal-width ASCII set under a CJK locale. Options are values (glyph sets are arrays). | E7, E10, E11 |
 | `fuzzy` | The okx fzf-style scorer with smart case (`Score`, `Filter`, `Match`), used by the palette and public for app filters. | — |
 | `tuitest` | `Drain(cmd, wait)` runs a command batch or sequence and returns its messages without waiting on toast or saver timers. | — |
@@ -229,6 +230,24 @@ Tests run command batches without sleeping on timers:
 msgs := tuitest.Drain(cmd, 0) // toast and saver ticks are skipped
 ```
 
+An image in a pane — detect in main, send beside the frame, draw as text:
+
+```go
+caps := kitty.Detect(os.Getenv, kitty.ExecTmux{}) // may run tmux: once, before the program
+out, tty, err := kitty.OpenTTY()                  // writes go beside Bubble Tea's frame
+// Init: tea.Batch(kitty.CellSizeCmd(os.Stdout.Fd()), kitty.EnsurePassthroughCmd(caps, kitty.ExecTmux{}))
+
+case tea.WindowSizeMsg:
+	next := m.img // kitty.Image{ID: 1, Source: kitty.Source{Key: path, Data: png}, Alt: "screenshot"}
+	next.Cols, next.Rows = kitty.Fit(imgW, imgH, paneW, paneH, m.cell.W, m.cell.H)
+	cmd = next.Cmds(m.img, m.caps, m.out, m.cell) // nil when nothing changed
+	m.img = next
+case kitty.Wrote:
+	// msg.Err: show it
+// View: m.img.View(m.caps) — exactly Cols×Rows cells; frame it, never truncate it
+```
+
+
 Charts take a `Look` from the theme and draw into a known width:
 
 ```go
@@ -250,5 +269,7 @@ lanes := chart.Lanes(windows, dayStart, dayStart.AddDate(0, 0, 1), w,
 | footer dropping | argx `view_chrome.go`, gcl `hints.go` |
 | overlay splice | argx `view_chrome.go` (`spliceOverlay`, dd1c8c9) |
 | truncate/pad | argx `render_util.go` |
+| kitty detection, passthrough, pane offset, `Fit` | ccx `internal/kitty/graphics.go`; visibility poll as a command from sendbird/ccx#175 (`kitty_watch.go`) |
+| kitty chunking, placeholders, payload shrinking, `Out` lock | ccproxy `internal/kitty`, `cmd/ccproxy/monitor_tui_detail.go`; diacritic table regenerated from Kitty's `rowcolumn-diacritics.txt` |
 | charts | ccproxy `renderSparkline` (max buckets, padding), ccx `stats_timeline.go` (ramp, mean buckets), narwhal `live.go` sparkline, gcl `timeline.go` (span cells, density, ruler, now, overflow), okx `refresh.go` (progress bar) |
 | styles, NO_COLOR, glyphs | dayx `styles.go`, okx `styles.go`, argx `glyphs.go` |
