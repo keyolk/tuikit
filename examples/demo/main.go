@@ -241,7 +241,7 @@ func (m model) View() string {
 		return frame
 	}
 	boxW, boxH := min(50, m.w-4), min(16, m.h-4)
-	lines := keys.RenderHelp(m.km.Help(keys.Opts{}, []keys.Ctx{ctxList, ctxGlobal}), boxW-4, boxH-2, m.helpOff, m.th.HelpStyle())
+	lines, _ := keys.RenderHelp(m.km.Help(keys.Opts{}, []keys.Ctx{ctxList, ctxGlobal}), boxW-4, boxH-2, m.helpOff, m.th.HelpStyle())
 	box := m.th.BoxFocus.Render(strings.Join(lines, "\n"))
 	return render.Center(render.Dim(frame), box, m.w, m.h) // over, not instead of (E8)
 }

@@ -171,13 +171,13 @@ func TestTableWithActionColumn(t *testing.T) {
 	if len(secs) != 2 {
 		t.Fatalf("table sections = %+v; shadowing must not hide modal or global", secs)
 	}
-	lines := RenderHelp(secs, 40, 20, 0, HelpStyle{Actions: true})
+	lines := rh(secs, 40, 20, 0, HelpStyle{Actions: true})
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "  q  close ") || !strings.HasSuffix(lines[4], " modal.close") || !strings.HasSuffix(lines[1], " quit") {
 		t.Fatalf("table =\n%s", joined)
 	}
 	for w := 1; w <= 40; w++ {
-		for _, l := range RenderHelp(secs, w, 20, 0, HelpStyle{Actions: true}) {
+		for _, l := range rh(secs, w, 20, 0, HelpStyle{Actions: true}) {
 			if len([]rune(l)) > w {
 				t.Fatalf("width %d: %q", w, l)
 			}
@@ -187,3 +187,45 @@ func TestTableWithActionColumn(t *testing.T) {
 
 // ctrl builds the key message for ctrl+<r>; tea numbers ctrl+a..ctrl+z from 1.
 func ctrl(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyType(r - 'a' + 1)} }
+
+func TestOverrideRejectsNewPinnedShadow(t *testing.T) {
+	km := New(
+		Binding{Action: "app.help", Keys: []string{"?"}, Ctx: ctxGlobal, Help: "help", Pinned: true},
+		Binding{Action: "down", Keys: []string{"j"}, Ctx: ctxList, Help: "down", Footer: 1},
+		Binding{Action: "modal.close", Keys: []string{"esc"}, Ctx: ctxModal, Help: "close"},
+	)
+	stacks := [][]Ctx{{ctxList, ctxGlobal}, {ctxModal, ctxGlobal}}
+	o := map[string][]string{"app.help": {"j"}}
+
+	_, err := km.Override(o, stacks...)
+	if err == nil || !strings.Contains(err.Error(), `shadowed: "j" in list (down) hides pinned app.help`) {
+		t.Fatalf("err = %v; want the new pinned shadow listed", err)
+	}
+	if b, _ := km.Resolve([]Ctx{ctxGlobal}, runes("?"), Opts{}); b.Action != "app.help" {
+		t.Fatal("a rejected override must leave km unchanged")
+	}
+	// Without stacks the shadow cannot be judged, as for Conflicts.
+	if _, err := km.Override(o); err != nil {
+		t.Fatalf("no stacks: %v", err)
+	}
+	// Only stacks where the contexts meet count: j is free in the modal.
+	if _, err := km.Override(o, []Ctx{ctxModal, ctxGlobal}); err != nil {
+		t.Fatalf("modal stack: %v", err)
+	}
+	// A declared shadow is still allowed after an override.
+	decl := New(
+		Binding{Action: "app.help", Keys: []string{"?"}, Ctx: ctxGlobal, Pinned: true},
+		Binding{Action: "down", Keys: []string{"j"}, Ctx: ctxList, Shadows: []string{"app.help"}},
+	)
+	if _, err := decl.Override(o, stacks...); err != nil {
+		t.Fatalf("declared shadow: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "keys.yaml")
+	if err := os.WriteFile(path, []byte("app.help: [j]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := km.LoadOverrides(path, stacks...); err == nil || !strings.Contains(err.Error(), "shadowed") {
+		t.Fatalf("LoadOverrides err = %v", err)
+	}
+}

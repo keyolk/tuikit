@@ -25,10 +25,13 @@ import (
 // context "list" with action "open") is an error rather than a guess.
 //
 // Override fails, returning km unchanged, when a name matches nothing or the
-// result binds one key to two actions in one context (a Duplicate the
-// original table did not have): the second action would silently become
-// unreachable. The error lists every problem.
-func (km Keymap) Override(o map[string][]string) (Keymap, error) {
+// result has a conflict the original table did not have: one key bound to
+// two actions in one context (Duplicate — the second action becomes
+// unreachable), or, in any of stacks, an inner key hiding a Pinned binding
+// (Shadowed — `help: [j]` where the list binds j makes help unreachable
+// there and drops its pinned hint). Pass the same stacks as to Conflicts;
+// without them only Duplicates can be judged. The error lists every problem.
+func (km Keymap) Override(o map[string][]string, stacks ...[]Ctx) (Keymap, error) {
 	if len(o) == 0 {
 		return km, nil
 	}
@@ -80,10 +83,10 @@ func (km Keymap) Override(o map[string][]string) (Keymap, error) {
 	out := Keymap{bindings: bs, index: buildIndex(bs)}
 
 	before := map[string]bool{}
-	for _, c := range km.duplicates() {
+	for _, c := range append(km.duplicates(), km.shadows(stacks)...) {
 		before[c.String()] = true
 	}
-	for _, c := range out.duplicates() {
+	for _, c := range append(out.duplicates(), out.shadows(stacks)...) {
 		if !before[c.String()] {
 			problems = append(problems, c.String())
 		}
@@ -111,8 +114,9 @@ func sortedNames(o map[string][]string) []string {
 //	list.open: [enter, o]
 //
 // A missing file is not an error — most users never write one — and returns
-// km unchanged. ConfigPath is the conventional location.
-func (km Keymap) LoadOverrides(path string) (Keymap, error) {
+// km unchanged. ConfigPath is the conventional location. stacks are passed to
+// Override.
+func (km Keymap) LoadOverrides(path string, stacks ...[]Ctx) (Keymap, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return km, nil
@@ -124,7 +128,7 @@ func (km Keymap) LoadOverrides(path string) (Keymap, error) {
 	if err := yaml.Unmarshal(data, &o); err != nil {
 		return km, fmt.Errorf("keymap override %s: %w", path, err)
 	}
-	out, err := km.Override(o)
+	out, err := km.Override(o, stacks...)
 	if err != nil {
 		return km, fmt.Errorf("%s: %w", path, err)
 	}

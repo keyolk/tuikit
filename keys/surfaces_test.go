@@ -129,27 +129,26 @@ func TestHelpGroupsInContextOrder(t *testing.T) {
 
 func TestRenderHelpCutsHonestly(t *testing.T) {
 	secs := testKeymap().Help(Opts{}, []Ctx{ctxList, ctxGlobal})
-	full := RenderHelp(secs, 40, 100, 0, HelpStyle{})
+	full := rh(secs, 40, 100, 0, HelpStyle{})
 	if len(full) != 12 { // 3 titles + 7 entries + 2 blank separators
 		t.Fatalf("full help is %d lines:\n%s", len(full), strings.Join(full, "\n"))
 	}
-	cut := RenderHelp(secs, 40, 5, 0, HelpStyle{})
+	cut := rh(secs, 40, 5, 0, HelpStyle{})
 	if len(cut) != 5 || !strings.HasPrefix(cut[4], "… ") || !strings.HasSuffix(cut[4], "more") {
 		t.Fatalf("cut = %q", cut)
 	}
 	if want := len(full) - 4; !strings.Contains(cut[4], strconv.Itoa(want)) {
 		t.Fatalf("cut says %q, want %d more", cut[4], want)
 	}
-	for _, l := range RenderHelp(secs, 12, 100, 0, HelpStyle{}) {
+	for _, l := range rh(secs, 12, 100, 0, HelpStyle{}) {
 		if ansi.StringWidth(l) > 12 {
 			t.Fatalf("line %q exceeds width", l)
 		}
 	}
-	scrolled := RenderHelp(secs, 40, 100, 1000, HelpStyle{})
-	if len(scrolled) != 1 {
-		t.Fatalf("offset past the end must clamp to the last line, got %q", scrolled)
+	if scrolled := rh(secs, 40, 100, 1000, HelpStyle{}); len(scrolled) != len(full) {
+		t.Fatalf("a page taller than the help must not scroll, got %q", scrolled)
 	}
-	if RenderHelp(secs, 0, 10, 0, HelpStyle{}) != nil || RenderHelp(secs, 10, 0, 0, HelpStyle{}) != nil {
+	if rh(secs, 0, 10, 0, HelpStyle{}) != nil || rh(secs, 10, 0, 0, HelpStyle{}) != nil {
 		t.Fatal("zero size renders nothing")
 	}
 }
@@ -174,5 +173,38 @@ func TestPaletteEntriesAndFilter(t *testing.T) {
 	}
 	if got := Filter(es, "zzz"); len(got) != 0 {
 		t.Fatalf("no match expected, got %+v", got)
+	}
+}
+
+// rh is RenderHelp without the clamped offset.
+func rh(secs []Section, w, h, off int, st HelpStyle) []string {
+	lines, _ := RenderHelp(secs, w, h, off, st)
+	return lines
+}
+
+func TestRenderHelpClampsAndReturnsOffset(t *testing.T) {
+	secs := testKeymap().Help(Opts{}, []Ctx{ctxList, ctxGlobal}) // 12 lines
+	const h = 5
+	// A held j: the stored offset must stop at the last full page.
+	off := 0
+	for range 100 {
+		_, off = RenderHelp(secs, 40, h, off+1, HelpStyle{})
+	}
+	if off != 12-h {
+		t.Fatalf("offset after 100 downs = %d, want %d", off, 12-h)
+	}
+	lines, _ := RenderHelp(secs, 40, h, off, HelpStyle{})
+	if len(lines) != h || strings.Contains(lines[h-1], "more") {
+		t.Fatalf("last page = %q; want %d full lines, nothing more below", lines, h)
+	}
+	// One k moves the page at once.
+	if _, back := RenderHelp(secs, 40, h, off-1, HelpStyle{}); back != off-1 {
+		t.Fatalf("one up = %d", back)
+	}
+	if _, neg := RenderHelp(secs, 40, h, -3, HelpStyle{}); neg != 0 {
+		t.Fatalf("negative offset clamps to 0, got %d", neg)
+	}
+	if _, tall := RenderHelp(secs, 40, 100, 7, HelpStyle{}); tall != 0 {
+		t.Fatalf("everything fits: offset %d, want 0", tall)
 	}
 }

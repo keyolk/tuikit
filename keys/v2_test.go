@@ -154,7 +154,7 @@ func TestNamesUsedByFooterAndHelp(t *testing.T) {
 	if got != "space open  ^c quit" {
 		t.Fatalf("caret footer = %q", got)
 	}
-	lines := RenderHelp(km.Help(Opts{}, stack), 40, 20, 0, HelpStyle{Names: Names{Glyphs: true}})
+	lines := rh(km.Help(Opts{}, stack), 40, 20, 0, HelpStyle{Names: Names{Glyphs: true}})
 	if !strings.Contains(strings.Join(lines, "\n"), "space/↵  open") {
 		t.Fatalf("help = %q", lines)
 	}
@@ -329,8 +329,8 @@ func TestRenderHelpStyled(t *testing.T) {
 		Muted: r.NewStyle().Faint(true),
 	}
 	secs := testKeymap().Help(Opts{}, []Ctx{ctxList, ctxGlobal})
-	plain := RenderHelp(secs, 40, 5, 0, HelpStyle{})
-	styled := RenderHelp(secs, 40, 5, 0, st)
+	plain := rh(secs, 40, 5, 0, HelpStyle{})
+	styled := rh(secs, 40, 5, 0, st)
 	if len(plain) != len(styled) {
 		t.Fatalf("styling changed the line count: %d vs %d", len(plain), len(styled))
 	}
@@ -343,7 +343,7 @@ func TestRenderHelpStyled(t *testing.T) {
 		t.Fatalf("title and more line must be styled: %q %q", styled[0], styled[4])
 	}
 	for w := 1; w <= 40; w++ {
-		for _, l := range RenderHelp(secs, w, 50, 0, st) {
+		for _, l := range rh(secs, w, 50, 0, st) {
 			if ansi.StringWidth(l) > w {
 				t.Fatalf("width %d: %q is %d cells", w, l, ansi.StringWidth(l))
 			}

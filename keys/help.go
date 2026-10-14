@@ -127,14 +127,20 @@ type HelpStyle struct {
 
 // RenderHelp lays sections out as lines of at most width cells, showing at
 // most height lines starting at offset. When lines are cut below, the last
-// line says `… N more` instead of overflowing the frame (E7). offset is
-// clamped, so a caller can scroll without knowing the total.
+// line says `… N more` instead of overflowing the frame (E7).
+//
+// offset is clamped to [0, last full page] and returned; store it back:
+//
+//	lines, m.helpOff = keys.RenderHelp(secs, w, h, m.helpOff, st)
+//
+// Otherwise a held j keeps growing the stored offset past the end, and the
+// user has to press k as many times again before the page moves.
 //
 // Every piece is cut to its cell budget before it is styled, so a style never
 // inflates a line past width.
-func RenderHelp(sections []Section, width, height, offset int, st HelpStyle) []string {
+func RenderHelp(sections []Section, width, height, offset int, st HelpStyle) ([]string, int) {
 	if width <= 0 || height <= 0 {
-		return nil
+		return nil, 0
 	}
 	keyText := func(e Entry) string {
 		names := make([]string, len(e.Keys))
@@ -180,7 +186,7 @@ func RenderHelp(sections []Section, width, height, offset int, st HelpStyle) []s
 			all = append(all, line{key: keyText(e), desc: e.Help, action: e.Action, entry: true})
 		}
 	}
-	offset = max(0, min(offset, len(all)-1))
+	offset = max(0, min(offset, len(all)-height))
 	all = all[offset:]
 	var more string
 	if len(all) > height {
@@ -209,7 +215,7 @@ func RenderHelp(sections []Section, width, height, offset int, st HelpStyle) []s
 	if more != "" {
 		out = append(out, st.Muted.Render(ansi.Truncate(more, width, "…")))
 	}
-	return out
+	return out, offset
 }
 
 func truncPad(s string, w int) string {
