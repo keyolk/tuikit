@@ -90,7 +90,7 @@ func TestLabelsFollowStateOnEverySurface(t *testing.T) {
 	if cs := km.Conflicts(stack); len(cs) != 0 {
 		t.Fatalf("one binding with labels is not a conflict: %v", cs)
 	}
-	if (Binding{Help: "h", Labels: map[string]string{"x": "y"}}).Label(func(string) string { return "nope" }) != "h" {
+	if (Binding{Help: "h", Labels: map[string]string{"x": "y"}}).Label(Opts{State: func(string) string { return "nope" }}) != "h" {
 		t.Fatal("an unlabelled state shows Help")
 	}
 }

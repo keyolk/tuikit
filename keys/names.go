@@ -3,8 +3,6 @@ package keys
 import (
 	"maps"
 	"strings"
-
-	"github.com/charmbracelet/x/ansi"
 )
 
 // Names turns key strings into what the footer, help and palette display.
@@ -67,12 +65,8 @@ func (n Names) Name(key string) string {
 // so a group never reads as one long key name.
 func (n Names) Join(keys []string) string {
 	names := make([]string, len(keys))
-	sep := ""
 	for i, k := range keys {
 		names[i] = n.Name(k)
-		if ansi.StringWidth(names[i]) != 1 {
-			sep = "/"
-		}
 	}
-	return strings.Join(names, sep)
+	return joinNames(names, "")
 }

@@ -35,35 +35,18 @@ func (km Keymap) Override(o map[string][]string, stacks ...[]Ctx) (Keymap, error
 	if len(o) == 0 {
 		return km, nil
 	}
-	type target struct {
-		ctx    Ctx
-		action string
-	}
-	plain := map[string]bool{}
-	scoped := map[target]bool{}
-	for _, b := range km.bindings {
-		plain[b.Action] = true
-		scoped[target{b.Ctx, b.Action}] = true
-	}
 	byAction := map[string][]string{}
 	byScope := map[target][]string{}
 	var problems []string
+	names := km.names()
 	for _, name := range sortedNames(o) {
-		var hits []target
-		for i := range len(name) {
-			if name[i] == '.' {
-				if t := (target{Ctx(name[:i]), name[i+1:]}); scoped[t] {
-					hits = append(hits, t)
-				}
-			}
-		}
-		switch {
-		case plain[name] && len(hits) > 0, len(hits) > 1:
+		switch kind, t := names.classify(name); kind {
+		case nameAmbiguous:
 			problems = append(problems, fmt.Sprintf("ambiguous name %q (an action and a context-qualified action)", name))
-		case plain[name]:
+		case namePlain:
 			byAction[name] = o[name]
-		case len(hits) == 1:
-			byScope[hits[0]] = o[name]
+		case nameScoped:
+			byScope[t] = o[name]
 		default:
 			problems = append(problems, fmt.Sprintf("unknown action %q", name))
 		}
@@ -73,11 +56,19 @@ func (km Keymap) Override(o map[string][]string, stacks ...[]Ctx) (Keymap, error
 	}
 
 	bs := km.Bindings()
+	set := func(i int, ks []string) {
+		// A KeyLabel ("1-9") describes the default keys; after a rebind it
+		// would name keys that no longer do anything.
+		if !slices.Equal(bs[i].Keys, ks) {
+			bs[i].KeyLabel = ""
+		}
+		bs[i].Keys = slices.Clone(ks)
+	}
 	for i, b := range bs {
 		if ks, ok := byScope[target{b.Ctx, b.Action}]; ok {
-			bs[i].Keys = slices.Clone(ks)
+			set(i, ks)
 		} else if ks, ok := byAction[b.Action]; ok {
-			bs[i].Keys = slices.Clone(ks)
+			set(i, ks)
 		}
 	}
 	out := Keymap{bindings: bs, index: buildIndex(bs)}
@@ -95,6 +86,98 @@ func (km Keymap) Override(o map[string][]string, stacks ...[]Ctx) (Keymap, error
 		return km, fmt.Errorf("keymap override creates conflicts: %s", strings.Join(problems, "; "))
 	}
 	return out, nil
+}
+
+type target struct {
+	ctx    Ctx
+	action string
+}
+
+type nameKind int
+
+const (
+	nameUnknown nameKind = iota
+	namePlain
+	nameScoped
+	nameAmbiguous
+)
+
+// tableNames is what override names can refer to in a table.
+type tableNames struct {
+	plain  map[string]bool
+	scoped map[target]bool
+}
+
+func (km Keymap) names() tableNames {
+	n := tableNames{plain: map[string]bool{}, scoped: map[target]bool{}}
+	for _, b := range km.bindings {
+		n.plain[b.Action] = true
+		n.scoped[target{b.Ctx, b.Action}] = true
+	}
+	return n
+}
+
+// classify reads name as an action or a context-qualified action.
+func (n tableNames) classify(name string) (nameKind, target) {
+	var hits []target
+	for i := range len(name) {
+		if name[i] == '.' {
+			if t := (target{Ctx(name[:i]), name[i+1:]}); n.scoped[t] {
+				hits = append(hits, t)
+			}
+		}
+	}
+	switch {
+	case n.plain[name] && len(hits) > 0, len(hits) > 1:
+		return nameAmbiguous, target{}
+	case n.plain[name]:
+		return namePlain, target{}
+	case len(hits) == 1:
+		return nameScoped, hits[0]
+	}
+	return nameUnknown, target{}
+}
+
+// Known splits overrides into the names this table binds and the ones it
+// does not (sorted). Several tables that share one keys.yaml (ghx's main,
+// admin and actions maps) each apply only their own entries:
+//
+//	o, err := keys.ReadOverrides(keys.ConfigPath("ghx"))
+//	mine, _ := adminKeys.Known(o)
+//	adminKeys, err = adminKeys.Override(mine, adminStacks...)
+//
+// An app that wants a typo reported checks that every name is known to at
+// least one table. Ambiguous names count as known, so Override still
+// reports them.
+func (km Keymap) Known(o map[string][]string) (known map[string][]string, unknown []string) {
+	names := km.names()
+	known = map[string][]string{}
+	for _, name := range sortedNames(o) {
+		if kind, _ := names.classify(name); kind == nameUnknown {
+			unknown = append(unknown, name)
+		} else {
+			known[name] = slices.Clone(o[name])
+		}
+	}
+	return known, unknown
+}
+
+// ReadOverrides reads an overrides file (see LoadOverrides) without applying
+// it, for apps that split one file between tables (Known). A missing file
+// is nil and no error.
+func ReadOverrides(path string) (map[string][]string, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("keymap override: %w", err)
+	}
+	var o map[string][]string
+	if err := yaml.Unmarshal(data, &o); err != nil {
+		return nil, fmt.Errorf("keymap override %s: %w", path, err)
+	}
+	return o, nil
 }
 
 func sortedNames(o map[string][]string) []string {
@@ -117,16 +200,9 @@ func sortedNames(o map[string][]string) []string {
 // km unchanged. ConfigPath is the conventional location. stacks are passed to
 // Override.
 func (km Keymap) LoadOverrides(path string, stacks ...[]Ctx) (Keymap, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return km, nil
-	}
+	o, err := ReadOverrides(path)
 	if err != nil {
-		return km, fmt.Errorf("keymap override: %w", err)
-	}
-	var o map[string][]string
-	if err := yaml.Unmarshal(data, &o); err != nil {
-		return km, fmt.Errorf("keymap override %s: %w", path, err)
+		return km, err
 	}
 	out, err := km.Override(o, stacks...)
 	if err != nil {
