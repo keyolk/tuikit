@@ -312,3 +312,15 @@ func (c Client) Current(ctx context.Context) (Location, error) {
 	}
 	return Location{SessionID: f[0], WindowID: f[1], PaneID: f[2]}, nil
 }
+
+// Run runs one raw tmux command and returns its stdout trimmed of
+// surrounding whitespace. It is the escape hatch for commands without a typed
+// method, and it makes Client satisfy kitty.TmuxQuerier, so one value serves
+// both packages. Run bypasses the ID checks; prefer the typed calls.
+func (c Client) Run(args ...string) (string, error) {
+	out, err := c.run(context.Background(), args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
