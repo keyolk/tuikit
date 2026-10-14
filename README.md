@@ -25,6 +25,7 @@ profile constant; it is already lipgloss's dependency.
 | `async` | `Gen` drops superseded results; `Flight` adds an in-flight guard for polls. Both are plain values. | E5 |
 | `prefs` | `$XDG_STATE_HOME/<app>/ui.json`; `Load` keeps defaults for missing fields and never mutates them; writes encode at call time and go temp-file-plus-rename with mode 0600, off the UI loop, reporting `Saved{Err}`. Every write carries a sequence number, so an older write never lands after a newer one. `Saver[T]` debounces bursts; `Flush`/`FlushWith(v)` write the latest state for quit (`Saved{Final: true}`); `SaveCmd` is the one-shot form. The zero `Saver` and app `""` persist nothing. | E12 |
 | `theme` | Colors by role (`Warn`, `Subtle`, `DiffAdded`…) as `AdaptiveColor`. NO_COLOR removes every color but keeps bold and reverse, so the selection stays visible. Unicode and ASCII glyph sets of equal widths (spinner frames, `Bar` glyphs included), chosen by locale or `<APP>_ASCII`; a CJK locale gets an ASCII `Ellipsis`. The zero `Theme` draws plain words. | E10, E11 |
+| `chart` | One-line charts whose lines are exactly `width` cells (`""` at width ≤ 0; widths 1-3 degrade, never overflow). `Sparkline`: 8-level ramp, resampled to the width by bucket `Mean` or `Max` (every cell covers an equal share), a short series pads rather than stretches unless `Stretch`, NaN is a gap, a constant series sits flat at mid-level, `Min`/`Max` fix the scale, `Last` marks the newest point. `Bar`/`Meter`: 1/8-cell fill (half-cell in ASCII), full only at 1, clamped; `Warn`/`Error` bands lead with ✓ ! ✗ (`v ! x`) so the band survives NO_COLOR; percent and label kept inside the width. `Timeline`: spans on a `[from,to)` row, exclusive ends, sub-cell spans keep one cell, overlaps merge into density levels on a shared `Peak`, overflow arrows, `Now`; `Ruler` labels follow the local clock and never overlap; `Lanes` groups spans by `Label` behind a cell-padded (Hangul-safe) column cut with the ellipsis. `Heat`: a day × hour grid on one scale, five levels, any non-zero cell visible. Glyphs carry the reading and theme roles (`LookFor(th)`) only color it. The Unicode set is block elements, which are East Asian Ambiguous, so `LookFor`/`DetectGlyphs` pick the equal-width ASCII set under a CJK locale. Options are values (glyph sets are arrays). | E7, E10, E11 |
 | `fuzzy` | The okx fzf-style scorer with smart case (`Score`, `Filter`, `Match`), used by the palette and public for app filters. | — |
 | `tuitest` | `Drain(cmd, wait)` runs a command batch or sequence and returns its messages without waiting on toast or saver timers. | — |
 
@@ -228,7 +229,17 @@ Tests run command batches without sleeping on timers:
 msgs := tuitest.Drain(cmd, 0) // toast and saver ticks are skipped
 ```
 
-`examples/demo` wires every package into a list + detail app: `go build ./examples/demo`.
+Charts take a `Look` from the theme and draw into a known width:
+
+```go
+look := chart.LookFor(m.th) // ASCII under ko/ja/zh, where blocks draw two cells
+row := chart.Sparkline(latencies, w-6, chart.SparkOpts{Look: look, Agg: chart.Max, Min: chart.Fixed(0), Last: true})
+disk := chart.Meter(56, 100, 22, chart.BarOpts{Look: look, Label: "/var"})   // "✓ ▕████▍   ▏  56% /var"
+lanes := chart.Lanes(windows, dayStart, dayStart.AddDate(0, 0, 1), w,
+	chart.TimelineOpts{Look: look, Now: time.Now(), Ruler: 3 * time.Hour}) // one row per Span.Label, then the ruler
+```
+
+`examples/demo` wires every package into a list + detail app (the detail ends in a chart row): `go build ./examples/demo`.
 
 ## Where the code came from
 
@@ -239,4 +250,5 @@ msgs := tuitest.Drain(cmd, 0) // toast and saver ticks are skipped
 | footer dropping | argx `view_chrome.go`, gcl `hints.go` |
 | overlay splice | argx `view_chrome.go` (`spliceOverlay`, dd1c8c9) |
 | truncate/pad | argx `render_util.go` |
+| charts | ccproxy `renderSparkline` (max buckets, padding), ccx `stats_timeline.go` (ramp, mean buckets), narwhal `live.go` sparkline, gcl `timeline.go` (span cells, density, ruler, now, overflow), okx `refresh.go` (progress bar) |
 | styles, NO_COLOR, glyphs | dayx `styles.go`, okx `styles.go`, argx `glyphs.go` |
