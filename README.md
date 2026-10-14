@@ -28,6 +28,20 @@ profile constant; it is already lipgloss's dependency.
 | `fuzzy` | The okx fzf-style scorer with smart case (`Score`, `Filter`, `Match`), used by the palette and public for app filters. | — |
 | `tuitest` | `Drain(cmd, wait)` runs a command batch or sequence and returns its messages without waiting on toast or saver timers. | — |
 
+## Cell width: one rule
+
+Every width in the kit (`render.Width`, `Truncate`, `Pad`, footer and help layout)
+counts cells the way lipgloss does, because lipgloss is what Bubble Tea renders with.
+Under a CJK locale `go-runewidth` counts East Asian *ambiguous* characters (`—`, `…`,
+`·`) as two cells, lipgloss and the kit count them as one. Mixing the two in one app
+misaligns columns, so:
+
+- measure with `render.Width` (or `lipgloss.Width`), never `runewidth.StringWidth`
+  directly in an app or its tests;
+- keep ambiguous-width glyphs out of aligned columns — the terminal, not the locale,
+  decides how many cells it actually draws for them. That is why `render.Ellipsis()`
+  is `~` under a CJK locale and why the glyph sets avoid ambiguous characters.
+
 ## Integration
 
 ```go
