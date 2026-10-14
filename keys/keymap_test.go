@@ -31,11 +31,11 @@ func testKeymap() Keymap {
 
 func TestResolveInnermostContextWins(t *testing.T) {
 	km := testKeymap()
-	b, ok := km.Resolve([]Ctx{ctxModal, ctxList, ctxGlobal}, runes("q"), nil)
+	b, ok := km.Resolve([]Ctx{ctxModal, ctxList, ctxGlobal}, runes("q"), Opts{})
 	if !ok || b.Action != "modal.close" {
 		t.Fatalf("q in modal = %q, %v; want modal.close", b.Action, ok)
 	}
-	b, ok = km.Resolve([]Ctx{ctxList, ctxGlobal}, runes("q"), nil)
+	b, ok = km.Resolve([]Ctx{ctxList, ctxGlobal}, runes("q"), Opts{})
 	if !ok || b.Action != "quit" {
 		t.Fatalf("q in list = %q, %v; want quit from the outer context", b.Action, ok)
 	}
@@ -44,7 +44,7 @@ func TestResolveInnermostContextWins(t *testing.T) {
 func TestResolveNormalizesHangul(t *testing.T) {
 	km := testKeymap()
 	// ㅓ is the physical j key.
-	b, ok := km.Resolve([]Ctx{ctxList, ctxGlobal}, runes("ㅓ"), nil)
+	b, ok := km.Resolve([]Ctx{ctxList, ctxGlobal}, runes("ㅓ"), Opts{})
 	if !ok || b.Action != "list.down" {
 		t.Fatalf("ㅓ = %q, %v; want list.down", b.Action, ok)
 	}
@@ -52,18 +52,18 @@ func TestResolveNormalizesHangul(t *testing.T) {
 
 func TestResolveRawKeepsHangulForTextInput(t *testing.T) {
 	km := testKeymap()
-	if b, ok := km.ResolveRaw([]Ctx{ctxInput, ctxList, ctxGlobal}, runes("ㅂ"), nil); ok {
+	if b, ok := km.ResolveRaw([]Ctx{ctxInput, ctxList, ctxGlobal}, runes("ㅂ"), Opts{}); ok {
 		t.Fatalf("raw ㅂ resolved to %q; a text field must receive the jamo", b.Action)
 	}
 }
 
 func TestResolveNamedKeys(t *testing.T) {
 	km := testKeymap()
-	b, ok := km.Resolve([]Ctx{ctxList}, tea.KeyMsg{Type: tea.KeyEnter}, nil)
+	b, ok := km.Resolve([]Ctx{ctxList}, tea.KeyMsg{Type: tea.KeyEnter}, Opts{})
 	if !ok || b.Action != "list.open" {
 		t.Fatalf("enter = %q, %v", b.Action, ok)
 	}
-	b, ok = km.Resolve([]Ctx{ctxList, ctxGlobal}, tea.KeyMsg{Type: tea.KeyCtrlC}, nil)
+	b, ok = km.Resolve([]Ctx{ctxList, ctxGlobal}, tea.KeyMsg{Type: tea.KeyCtrlC}, Opts{})
 	if !ok || b.Action != "quit" {
 		t.Fatalf("ctrl+c = %q, %v", b.Action, ok)
 	}
@@ -72,17 +72,17 @@ func TestResolveNamedKeys(t *testing.T) {
 func TestResolveDisabledFallsThroughToOuterContext(t *testing.T) {
 	km := testKeymap()
 	off := func(a string) bool { return a != "modal.close" }
-	b, ok := km.Resolve([]Ctx{ctxModal, ctxGlobal}, runes("q"), off)
+	b, ok := km.Resolve([]Ctx{ctxModal, ctxGlobal}, runes("q"), Opts{Enabled: off})
 	if !ok || b.Action != "quit" {
 		t.Fatalf("disabled modal.close should fall through to quit, got %q, %v", b.Action, ok)
 	}
-	if _, ok := km.Resolve([]Ctx{ctxModal}, tea.KeyMsg{Type: tea.KeyEsc}, off); ok {
+	if _, ok := km.Resolve([]Ctx{ctxModal}, tea.KeyMsg{Type: tea.KeyEsc}, Opts{Enabled: off}); ok {
 		t.Fatal("a disabled binding with no outer match must resolve to nothing")
 	}
 }
 
 func TestResolveUnboundKey(t *testing.T) {
-	if _, ok := testKeymap().Resolve([]Ctx{ctxList, ctxGlobal}, runes("z"), nil); ok {
+	if _, ok := testKeymap().Resolve([]Ctx{ctxList, ctxGlobal}, runes("z"), Opts{}); ok {
 		t.Fatal("z is unbound")
 	}
 }
@@ -91,12 +91,12 @@ func TestNewCopiesCallerSlices(t *testing.T) {
 	keysIn := []string{"x"}
 	km := New(Binding{Action: "a", Keys: keysIn, Ctx: ctxGlobal})
 	keysIn[0] = "y"
-	if _, ok := km.Resolve([]Ctx{ctxGlobal}, runes("x"), nil); !ok {
+	if _, ok := km.Resolve([]Ctx{ctxGlobal}, runes("x"), Opts{}); !ok {
 		t.Fatal("mutating the caller's slice changed the keymap")
 	}
 	bs := km.Bindings()
 	bs[0].Keys[0] = "z"
-	if _, ok := km.Resolve([]Ctx{ctxGlobal}, runes("x"), nil); !ok {
+	if _, ok := km.Resolve([]Ctx{ctxGlobal}, runes("x"), Opts{}); !ok {
 		t.Fatal("mutating Bindings() output changed the keymap")
 	}
 }
@@ -107,13 +107,13 @@ func TestOverrideReturnsNewKeymapAndLeavesOriginal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, ok := km2.Resolve([]Ctx{ctxList}, runes("x"), nil); !ok || b.Action != "list.delete" {
+	if b, ok := km2.Resolve([]Ctx{ctxList}, runes("x"), Opts{}); !ok || b.Action != "list.delete" {
 		t.Fatal("override did not bind x")
 	}
-	if _, ok := km2.Resolve([]Ctx{ctxList}, runes("d"), nil); ok {
+	if _, ok := km2.Resolve([]Ctx{ctxList}, runes("d"), Opts{}); ok {
 		t.Fatal("override must replace, not add")
 	}
-	if b, ok := km.Resolve([]Ctx{ctxList}, runes("d"), nil); !ok || b.Action != "list.delete" {
+	if b, ok := km.Resolve([]Ctx{ctxList}, runes("d"), Opts{}); !ok || b.Action != "list.delete" {
 		t.Fatal("the original keymap changed")
 	}
 }
@@ -121,7 +121,7 @@ func TestOverrideReturnsNewKeymapAndLeavesOriginal(t *testing.T) {
 func TestOverrideUnknownActionsListsThem(t *testing.T) {
 	km := testKeymap()
 	_, err := km.Override(map[string][]string{"nope": {"x"}, "also.nope": {"y"}, "quit": {"Q"}})
-	if err == nil || !strings.Contains(err.Error(), "also.nope, nope") {
+	if err == nil || !strings.Contains(err.Error(), `"also.nope"; unknown action "nope"`) {
 		t.Fatalf("err = %v; want both unknown actions, sorted", err)
 	}
 }
@@ -134,7 +134,7 @@ func TestLoadOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("missing file: %v", err)
 	}
-	if _, ok := same.Resolve([]Ctx{ctxList}, runes("d"), nil); !ok {
+	if _, ok := same.Resolve([]Ctx{ctxList}, runes("d"), Opts{}); !ok {
 		t.Fatal("missing file must leave the keymap as is")
 	}
 
@@ -146,7 +146,7 @@ func TestLoadOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, ok := km2.Resolve([]Ctx{ctxList}, tea.KeyMsg{Type: tea.KeyDelete}, nil); !ok || b.Action != "list.delete" {
+	if b, ok := km2.Resolve([]Ctx{ctxList}, tea.KeyMsg{Type: tea.KeyDelete}, Opts{}); !ok || b.Action != "list.delete" {
 		t.Fatal("yaml override did not apply")
 	}
 

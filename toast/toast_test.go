@@ -236,3 +236,82 @@ func TestLevelString(t *testing.T) {
 		t.Error("unknown level falls back to info prefix")
 	}
 }
+
+func TestWithClockDrivesDwell(t *testing.T) {
+	now := time.Unix(1000, 0)
+	q := WithClock(New(3), func() time.Time { return now })
+	q, _ = Push(q, Toast{Text: "boom", Level: Error})
+	now = now.Add(MinDwell / 2)
+	if q = OnKey(q); q.Len() != 1 {
+		t.Fatal("error cleared before MinDwell on the injected clock")
+	}
+	now = now.Add(MinDwell)
+	if q = OnKey(q); q.Len() != 0 {
+		t.Fatal("error not cleared after MinDwell on the injected clock")
+	}
+}
+
+func TestExpiredMsgAndExpireAll(t *testing.T) {
+	q, _ := Push(Queue{}, Toast{Source: "a", Text: "ok", Level: Success})
+	q, _ = Push(q, Toast{Source: "b", Text: "bad", Level: Error})
+	okID, errID := q.Items()[0].ID(), q.Items()[1].ID()
+	if _, ok := q.ExpiredMsg(errID); ok {
+		t.Fatal("errors have no tick")
+	}
+	if _, ok := q.ExpiredMsg(999); ok {
+		t.Fatal("unknown id")
+	}
+	msg, ok := q.ExpiredMsg(okID)
+	if !ok {
+		t.Fatal("no message for a queued success")
+	}
+	if got := Update(q, msg); got.Len() != 1 || got.Items()[0].Level != Error {
+		t.Fatalf("Update(ExpiredMsg) left %d toasts", got.Len())
+	}
+
+	// A message built before Hold/Release is stale afterwards.
+	held := Hold(q)
+	rel, _ := Release(held)
+	if Update(rel, msg).Len() != 2 {
+		t.Fatal("a pre-Release message must not expire the re-armed toast")
+	}
+	fresh, _ := rel.ExpiredMsg(okID)
+	if Update(rel, fresh).Len() != 1 {
+		t.Fatal("the re-armed message must expire it")
+	}
+
+	if got := ExpireAll(q); got.Len() != 1 || got.Items()[0].Level != Error {
+		t.Fatalf("ExpireAll kept %d toasts; errors only", got.Len())
+	}
+	if ExpireAll(Hold(q)).Len() != 2 {
+		t.Fatal("a held queue does not expire")
+	}
+	if q.Len() != 2 {
+		t.Fatal("ExpireAll changed its input")
+	}
+}
+
+func TestDismissBySource(t *testing.T) {
+	q, _ := Push(Queue{}, Toast{Source: "poll", Text: "poll failed", Level: Error})
+	q, _ = Push(q, Toast{Source: "load", Text: "loaded"})
+	q, _ = Push(q, Toast{Text: "anon"})
+	d := Dismiss(Hold(q), "poll")
+	if d.Len() != 2 || d.Items()[0].Source != "load" {
+		t.Fatalf("Dismiss left %+v", d.Items())
+	}
+	if Dismiss(q, "").Len() != 3 {
+		t.Fatal("empty source dismisses nothing")
+	}
+	if q.Len() != 3 {
+		t.Fatal("Dismiss changed its input")
+	}
+}
+
+func TestClockIsPerCopy(t *testing.T) {
+	fixed := time.Unix(0, 0)
+	a := New(3)
+	b := WithClock(a, func() time.Time { return fixed })
+	if a.now != nil || b.clock() != fixed {
+		t.Fatal("WithClock changed the original queue")
+	}
+}

@@ -94,6 +94,17 @@ func TestAdaptersCarryStyles(t *testing.T) {
 	if fs := th.FooterStyle(); fs.Key.Render("k") != th.Key.Render("k") {
 		t.Fatal("FooterStyle lost the theme")
 	}
+	hs := th.HelpStyle()
+	if hs.Title.Render("t") != th.Title.Render("t") || hs.Key.Render("k") != th.Key.Render("k") ||
+		hs.Muted.Render("m") != th.Muted.Render("m") {
+		t.Fatal("HelpStyle lost the theme")
+	}
+	if hs.Names.Name("enter") != "enter" || th.FooterStyle().Names.Glyphs {
+		t.Fatal("an ASCII theme must name keys in words")
+	}
+	if uni := NewWith(colorRenderer(), DefaultRoles(), Unicode()); uni.HelpStyle().Names.Name("enter") != "↵" {
+		t.Fatal("a Unicode theme names keys with glyphs")
+	}
 	if box := th.Box.Render("x"); !strings.Contains(box, "+") || strings.ContainsAny(box, "╭─") {
 		t.Fatalf("ASCII theme box = %q", box)
 	}

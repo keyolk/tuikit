@@ -76,3 +76,22 @@ func ReachableUnderCJK(key string) bool {
 	}
 	return strings.ContainsRune("QWERTOP", rune(key[0]))
 }
+
+// TypedText is the text k types into a field: the runes of a key press, a
+// batch of runes delivered at once, or a bracketed paste, and " " for the
+// space bar. ok is false for everything else — named keys, ctrl chords,
+// alt+letter — which the field should treat as commands.
+//
+// Jamo come back as typed, never normalized: a text field wants Korean. The
+// text may hold control characters from a paste; input.Field strips them.
+func TypedText(k tea.KeyMsg) (text string, ok bool) {
+	switch {
+	case k.Alt:
+		return "", false
+	case k.Type == tea.KeySpace:
+		return " ", true
+	case k.Type == tea.KeyRunes && len(k.Runes) > 0:
+		return string(k.Runes), true
+	}
+	return "", false
+}

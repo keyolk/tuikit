@@ -26,6 +26,20 @@ func Window(total, height, cursor, offset int) (start, end, newOffset int) {
 	return offset, min(total, offset+height), offset
 }
 
+// MoreLine is the one-line form, for a list with a single status row:
+// "↑ 3 ↓ 12 more", "↑ 3 more", "↓ 12 more", or "" when nothing is hidden.
+func MoreLine(above, below int) string {
+	switch {
+	case above > 0 && below > 0:
+		return fmt.Sprintf("↑ %d ↓ %d more", above, below)
+	case above > 0:
+		return fmt.Sprintf("↑ %d more", above)
+	case below > 0:
+		return fmt.Sprintf("↓ %d more", below)
+	}
+	return ""
+}
+
 // More returns the `↑ N more` / `↓ N more` lines for a window with above rows
 // hidden before it and below after it; an empty string means nothing is
 // hidden on that side. When height (the rows the list has, including these
@@ -42,10 +56,7 @@ func More(above, below, height int) (top, bottom string) {
 		bottom = fmt.Sprintf("↓ %d more", below)
 	}
 	if height < 3 && above > 0 {
-		top, bottom = "", fmt.Sprintf("↑ %d more", above)
-		if below > 0 {
-			bottom = fmt.Sprintf("↑ %d ↓ %d more", above, below)
-		}
+		top, bottom = "", MoreLine(above, below)
 	}
 	return top, bottom
 }

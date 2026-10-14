@@ -18,7 +18,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
+
+	"github.com/keyolk/tuikit/render"
 )
 
 // Level is a toast's severity.
@@ -29,6 +30,12 @@ const (
 	Success
 	Warn
 	Error
+	// Progress is work still running ("syncing 3/10"): no TTL and no key
+	// clears it. The result replaces it — push the Success or Error with the
+	// same Source — or Dismiss(source) removes it. Give it a Source, or
+	// nothing can ever take it down. Before Progress, dayx faked this with a
+	// two-minute TTL and a Dismiss.
+	Progress
 )
 
 func (l Level) String() string {
@@ -39,9 +46,14 @@ func (l Level) String() string {
 		return "warn"
 	case Error:
 		return "error"
+	case Progress:
+		return "progress"
 	}
 	return "info"
 }
+
+// sticky levels have no expiry tick.
+func (l Level) sticky() bool { return l == Error || l == Progress }
 
 const (
 	// DefaultMax is how many toasts are kept (and drawn) at once.
@@ -62,7 +74,7 @@ type Toast struct {
 	Source string
 	Text   string
 	Level  Level
-	TTL    time.Duration // zero means DefaultTTL; ignored for Error
+	TTL    time.Duration // zero means DefaultTTL; ignored for Error and Progress
 
 	id      uint64
 	arm     uint64    // which tick may expire it; bumped on Release
@@ -85,6 +97,24 @@ type Queue struct {
 	next  uint64
 	max   int
 	held  bool
+	// now is the clock; nil means time.Now. A func is safe to share between
+	// copies: it is replaced, never mutated.
+	now func() time.Time
+}
+
+// WithClock returns q reading time from now instead of time.Now, so a test
+// can step past MinDwell without sleeping. Ticks still use real timers; build
+// their messages with ExpiredMsg instead of waiting for them.
+func WithClock(q Queue, now func() time.Time) Queue {
+	q.now = now
+	return q
+}
+
+func (q Queue) clock() time.Time {
+	if q.now == nil {
+		return time.Now()
+	}
+	return q.now()
 }
 
 // New returns an empty queue showing at most max toasts.
@@ -108,14 +138,46 @@ func (q Queue) limit() int {
 
 // Push queues t and returns the tick that will expire it. Errors are sticky
 // (nil cmd): they stay until a key after they were seen (OnKey) or until a
-// newer toast from the same Source replaces them. While the queue is held no
+// newer toast from the same Source replaces them. Progress is sticky too,
+// and keys do not clear it. While the queue is held no
 // tick is started; Release starts it, so a toast is never shown for less than
 // its TTL.
 //
-// When the cap is exceeded the oldest non-error toast goes first, so a burst
-// of successes cannot push an unread error off the screen.
+// When the cap is exceeded the oldest non-sticky toast goes first, so a
+// burst of successes cannot push an unread error or a running task off the
+// screen.
 func Push(q Queue, t Toast) (Queue, tea.Cmd) {
-	return push(q, t, time.Now())
+	return push(q, t, q.clock())
+}
+
+// Add is Push without the command, for helpers deep in Update that return
+// only a model: they add toasts, and the top of Update starts every tick
+// owed in one place with Ticks.
+//
+//	before := m.toasts
+//	m = m.handle(msg)                                  // may call toast.Add
+//	return m, tea.Batch(cmd, toast.Ticks(before, m.toasts))
+func Add(q Queue, t Toast) Queue {
+	q, _ = push(q, t, q.clock()) // the tick is Ticks' job
+	return q
+}
+
+// Ticks returns the expiry ticks owed between old and new, where new was
+// derived from old (Add, Push, Release, ...): one for every non-sticky toast
+// in new armed after old was. Toasts Push already ticked are ticked again;
+// the second Expired finds nothing and is harmless. A held new owes nothing
+// yet — Release will.
+func Ticks(old, new Queue) tea.Cmd {
+	if new.held {
+		return nil
+	}
+	var cmds []tea.Cmd
+	for _, t := range new.items {
+		if t.arm > old.next && !t.Level.sticky() {
+			cmds = append(cmds, tick(t))
+		}
+	}
+	return tea.Batch(cmds...)
 }
 
 func push(q Queue, t Toast, now time.Time) (Queue, tea.Cmd) {
@@ -142,12 +204,12 @@ func push(q Queue, t Toast, now time.Time) (Queue, tea.Cmd) {
 	return q, tick(t)
 }
 
-// dropOldest removes the oldest non-error toast, or the oldest toast when
-// every one is an error. items is freshly allocated by the caller.
+// dropOldest removes the oldest non-sticky toast, or the oldest toast when
+// every one is sticky. items is freshly allocated by the caller.
 func dropOldest(items []Toast) []Toast {
 	at := 0
 	for i, it := range items {
-		if it.Level != Error {
+		if !it.Level.sticky() {
 			at = i
 			break
 		}
@@ -156,7 +218,7 @@ func dropOldest(items []Toast) []Toast {
 }
 
 func tick(t Toast) tea.Cmd {
-	if t.Level == Error {
+	if t.Level.sticky() {
 		return nil
 	}
 	d := t.TTL
@@ -179,10 +241,45 @@ func Update(q Queue, msg tea.Msg) Queue {
 	return q.filter(func(t Toast) bool { return t.id != e.ID || t.arm != e.arm })
 }
 
+// ExpiredMsg is the message the live tick of toast id will deliver, for tests
+// that drive expiry without waiting on a timer. ok is false when id is not
+// queued or is sticky (Error and Progress have no tick). A message built before a
+// Release is stale after it, exactly as the real tick would be.
+func (q Queue) ExpiredMsg(id uint64) (Expired, bool) {
+	for _, t := range q.items {
+		if t.id == id && !t.Level.sticky() {
+			return Expired{ID: id, arm: t.arm}, true
+		}
+	}
+	return Expired{}, false
+}
+
+// ExpireAll removes every non-sticky toast as if each tick had fired now.
+// Errors and Progress stay: they are sticky by design. A held queue is
+// unchanged, as with Update.
+func ExpireAll(q Queue) Queue {
+	if q.held {
+		return q
+	}
+	return q.filter(func(t Toast) bool { return t.Level.sticky() })
+}
+
+// Dismiss removes every toast from source, errors included, held or not: the
+// condition it reported is gone (a retry succeeded, a dialog was closed). An
+// empty source matches nothing, since empty-source toasts are anonymous.
+// Their pending ticks find nothing to remove.
+func Dismiss(q Queue, source string) Queue {
+	if source == "" {
+		return q
+	}
+	return q.filter(func(t Toast) bool { return t.Source != source })
+}
+
 // OnKey clears sticky errors that have been on screen for at least MinDwell.
+// Progress toasts stay: the work they report is still running.
 // Call it at the top of key handling, before the handler can push a new
 // error in response to this same key.
-func OnKey(q Queue) Queue { return onKey(q, time.Now()) }
+func OnKey(q Queue) Queue { return onKey(q, q.clock()) }
 
 func onKey(q Queue, now time.Time) Queue {
 	if q.held {
@@ -211,10 +308,10 @@ func Hold(q Queue) Queue {
 	return q
 }
 
-// Release resumes the queue and re-arms every non-error toast with a full
+// Release resumes the queue and re-arms every non-sticky toast with a full
 // TTL: they were hidden, so their time on screen starts now. Ticks started
 // before Hold are invalidated by the new arm.
-func Release(q Queue) (Queue, tea.Cmd) { return release(q, time.Now()) }
+func Release(q Queue) (Queue, tea.Cmd) { return release(q, q.clock()) }
 
 func release(q Queue, now time.Time) (Queue, tea.Cmd) {
 	if !q.held {
@@ -225,7 +322,7 @@ func release(q Queue, now time.Time) (Queue, tea.Cmd) {
 	var cmds []tea.Cmd
 	for i, t := range q.items {
 		t.shownAt = now
-		if t.Level != Error {
+		if !t.Level.sticky() {
 			q.next++
 			t.arm = q.next
 			cmds = append(cmds, tick(t))
@@ -239,15 +336,18 @@ func release(q Queue, now time.Time) (Queue, tea.Cmd) {
 // Styles colors toasts by level. Color alone is not enough — NO_COLOR and
 // color-blind readers lose it — so every line also carries a prefix.
 type Styles struct {
-	Info, Success, Warn, Error lipgloss.Style
+	Info, Success, Warn, Error, Progress lipgloss.Style
 	// ASCII swaps the glyph prefixes for words, for terminals whose locale
 	// cannot be trusted with ✓/✗.
 	ASCII bool
+	// Ellipsis marks a cut line. Empty uses render.Ellipsis() (`~` under a
+	// CJK locale, where `…` is two cells wide).
+	Ellipsis string
 }
 
 // Prefix is the marker drawn before a toast of level l.
 func (st Styles) Prefix(l Level) string {
-	if l < Info || l > Error {
+	if l < Info || l > Progress {
 		l = Info
 	}
 	if st.ASCII {
@@ -257,8 +357,9 @@ func (st Styles) Prefix(l Level) string {
 }
 
 var (
-	glyphPrefix = [...]string{Info: "i", Success: "✓", Warn: "!", Error: "✗"}
-	asciiPrefix = [...]string{Info: "info:", Success: "ok:", Warn: "warn:", Error: "error:"}
+	// ◌ is not East Asian Ambiguous, so it stays one cell on CJK terminals.
+	glyphPrefix = [...]string{Info: "i", Success: "✓", Warn: "!", Error: "✗", Progress: "◌"}
+	asciiPrefix = [...]string{Info: "info:", Success: "ok:", Warn: "warn:", Error: "error:", Progress: "wait:"}
 )
 
 func (st Styles) style(l Level) lipgloss.Style {
@@ -269,8 +370,22 @@ func (st Styles) style(l Level) lipgloss.Style {
 		return st.Warn
 	case Error:
 		return st.Error
+	case Progress:
+		return st.Progress
 	}
 	return st.Info
+}
+
+// RenderItem draws one toast as a single line of at most width cells, the
+// way View draws each: for an app that shows the newest toast inline in a
+// status line rather than as a stack.
+func RenderItem(t Toast, width int, st Styles) string {
+	if width <= 0 {
+		return ""
+	}
+	text := strings.ReplaceAll(t.Text, "\n", " ")
+	line := render.TruncateMarker(st.Prefix(t.Level)+" "+text, width, render.Or(st.Ellipsis))
+	return st.style(t.Level).Render(line)
 }
 
 // View draws one line per toast, oldest first, each at most width cells. A
@@ -281,9 +396,7 @@ func View(q Queue, width int, st Styles) string {
 	}
 	lines := make([]string, len(q.items))
 	for i, t := range q.items {
-		text := strings.ReplaceAll(t.Text, "\n", " ")
-		line := ansi.Truncate(st.Prefix(t.Level)+" "+text, width, "…")
-		lines[i] = st.style(t.Level).Render(line)
+		lines[i] = RenderItem(t, width, st)
 	}
 	return strings.Join(lines, "\n")
 }

@@ -15,32 +15,92 @@ import (
 )
 
 // Width is the display width of s in cells, ignoring escape sequences.
-func Width(s string) int { return ansi.StringWidth(s) }
+//
+// Plain printable ASCII is measured by its length without the grapheme
+// walk: narwhal kept a local truncate for that fast path, worth 34ms per
+// frame on a long list.
+func Width(s string) int {
+	if printableASCII(s) {
+		return len(s)
+	}
+	return ansi.StringWidth(s)
+}
 
-// Truncate cuts s to at most w cells, ending in `…` when anything was cut.
-// Styled input is safe: sequences are never split and the trailing reset is
-// kept. A wide character that would straddle the edge is dropped whole.
+// printableASCII reports whether every byte of s is in 0x20..0x7e, so one
+// byte is one cell. ESC and other controls take the slow path.
+func printableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// Truncate cuts s to at most w cells, ending in the default marker
+// (Ellipsis) when anything was cut. Styled input is safe: sequences are never
+// split and the trailing reset is kept. A wide character that would straddle
+// the edge is dropped whole.
 func Truncate(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	if ansi.StringWidth(s) <= w {
+	if Width(s) <= w {
 		return s
 	}
-	return ansi.Truncate(s, w, "…")
+	return cut(s, w, Ellipsis())
+}
+
+// TruncateMarker is Truncate with an explicit marker ("~", "...", or "" for a
+// hard cut). A marker wider than w is dropped, so the result still shows as
+// much of s as fits rather than nothing.
+func TruncateMarker(s string, w int, marker string) string {
+	if w <= 0 {
+		return ""
+	}
+	if Width(s) <= w {
+		return s
+	}
+	return cut(s, w, marker)
+}
+
+// cut assumes Width(s) > w > 0.
+func cut(s string, w int, marker string) string {
+	mw := Width(marker)
+	if mw > w {
+		marker, mw = "", 0
+	}
+	if printableASCII(s) {
+		return s[:w-mw] + marker
+	}
+	return ansi.Truncate(s, w, marker)
 }
 
 // Pad returns s as exactly w cells: padded with spaces on the right, or
-// truncated with `…` when longer. Columns built with it line up whatever
-// script the cell holds (fmt's %-20s pads by runes, so Hangul shifts the next
-// column; lipgloss Style.Width wraps instead of padding).
+// truncated with the default marker when longer. Columns built with it line
+// up whatever script the cell holds (fmt's %-20s pads by runes, so Hangul
+// shifts the next column; lipgloss Style.Width wraps instead of padding).
 func Pad(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	s = Truncate(s, w)
-	if d := w - ansi.StringWidth(s); d > 0 {
-		s += strings.Repeat(" ", d)
+	return PadRight(Truncate(s, w), w)
+}
+
+// PadRight pads s with spaces on the right to w cells and never truncates: a
+// longer s comes back unchanged. Use it where cutting would lose meaning (a
+// value column the caller already sized) or after TruncateMarker.
+func PadRight(s string, w int) string {
+	if d := w - Width(s); d > 0 {
+		return s + strings.Repeat(" ", d)
+	}
+	return s
+}
+
+// PadLeft right-aligns s in w cells (numbers, counts) and never truncates.
+func PadLeft(s string, w int) string {
+	if d := w - Width(s); d > 0 {
+		return strings.Repeat(" ", d) + s
 	}
 	return s
 }
