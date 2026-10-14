@@ -85,6 +85,24 @@ type Queue struct {
 	next  uint64
 	max   int
 	held  bool
+	// now is the clock; nil means time.Now. A func is safe to share between
+	// copies: it is replaced, never mutated.
+	now func() time.Time
+}
+
+// WithClock returns q reading time from now instead of time.Now, so a test
+// can step past MinDwell without sleeping. Ticks still use real timers; build
+// their messages with ExpiredMsg instead of waiting for them.
+func WithClock(q Queue, now func() time.Time) Queue {
+	q.now = now
+	return q
+}
+
+func (q Queue) clock() time.Time {
+	if q.now == nil {
+		return time.Now()
+	}
+	return q.now()
 }
 
 // New returns an empty queue showing at most max toasts.
@@ -115,7 +133,7 @@ func (q Queue) limit() int {
 // When the cap is exceeded the oldest non-error toast goes first, so a burst
 // of successes cannot push an unread error off the screen.
 func Push(q Queue, t Toast) (Queue, tea.Cmd) {
-	return push(q, t, time.Now())
+	return push(q, t, q.clock())
 }
 
 func push(q Queue, t Toast, now time.Time) (Queue, tea.Cmd) {
@@ -179,10 +197,44 @@ func Update(q Queue, msg tea.Msg) Queue {
 	return q.filter(func(t Toast) bool { return t.id != e.ID || t.arm != e.arm })
 }
 
+// ExpiredMsg is the message the live tick of toast id will deliver, for tests
+// that drive expiry without waiting on a timer. ok is false when id is not
+// queued or is an error (errors have no tick). A message built before a
+// Release is stale after it, exactly as the real tick would be.
+func (q Queue) ExpiredMsg(id uint64) (Expired, bool) {
+	for _, t := range q.items {
+		if t.id == id && t.Level != Error {
+			return Expired{ID: id, arm: t.arm}, true
+		}
+	}
+	return Expired{}, false
+}
+
+// ExpireAll removes every non-error toast as if each tick had fired now.
+// Errors stay: they are sticky by design. A held queue is unchanged, as with
+// Update.
+func ExpireAll(q Queue) Queue {
+	if q.held {
+		return q
+	}
+	return q.filter(func(t Toast) bool { return t.Level == Error })
+}
+
+// Dismiss removes every toast from source, errors included, held or not: the
+// condition it reported is gone (a retry succeeded, a dialog was closed). An
+// empty source matches nothing, since empty-source toasts are anonymous.
+// Their pending ticks find nothing to remove.
+func Dismiss(q Queue, source string) Queue {
+	if source == "" {
+		return q
+	}
+	return q.filter(func(t Toast) bool { return t.Source != source })
+}
+
 // OnKey clears sticky errors that have been on screen for at least MinDwell.
 // Call it at the top of key handling, before the handler can push a new
 // error in response to this same key.
-func OnKey(q Queue) Queue { return onKey(q, time.Now()) }
+func OnKey(q Queue) Queue { return onKey(q, q.clock()) }
 
 func onKey(q Queue, now time.Time) Queue {
 	if q.held {
@@ -214,7 +266,7 @@ func Hold(q Queue) Queue {
 // Release resumes the queue and re-arms every non-error toast with a full
 // TTL: they were hidden, so their time on screen starts now. Ticks started
 // before Hold are invalidated by the new arm.
-func Release(q Queue) (Queue, tea.Cmd) { return release(q, time.Now()) }
+func Release(q Queue) (Queue, tea.Cmd) { return release(q, q.clock()) }
 
 func release(q Queue, now time.Time) (Queue, tea.Cmd) {
 	if !q.held {
