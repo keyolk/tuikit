@@ -17,6 +17,7 @@ import (
 	"github.com/keyolk/tuikit/fuzzy"
 	"github.com/keyolk/tuikit/input"
 	"github.com/keyolk/tuikit/keys"
+	"github.com/keyolk/tuikit/kitty"
 	"github.com/keyolk/tuikit/list"
 	"github.com/keyolk/tuikit/prefs"
 	"github.com/keyolk/tuikit/render"
@@ -132,12 +133,16 @@ type model struct {
 	help    bool
 	helpOff int
 	w, h    int
+
+	pic picture // kitty graphics, see picture.go
 }
 
 // Init cannot change the model — its receiver is a copy and it returns only a
 // command — so the first detail load is requested by message and the
 // generation is bumped in Update, where the change is kept.
-func (m model) Init() tea.Cmd { return func() tea.Msg { return selectMsg{} } }
+func (m model) Init() tea.Cmd {
+	return tea.Batch(func() tea.Msg { return selectMsg{} }, m.pic.initCmd(os.Stdout.Fd(), kitty.ExecTmux{}))
+}
 
 func (m model) active() []keys.Ctx {
 	switch {
@@ -237,10 +242,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) update(msg tea.Msg) (model, tea.Cmd) {
+	if m, cmd, ok := m.updatePicture(msg); ok {
+		return m, cmd
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 		m.rows = m.rows.SetHeight(m.listRows())
+		var cmd tea.Cmd
+		m.pic, cmd = m.pic.resize(m.pictureBox())
+		return m, cmd
 	case toast.Expired:
 		m.toasts = toast.Update(m.toasts, msg)
 	case prefs.SaveTick:
@@ -252,7 +263,9 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 			m.logf("save prefs: %v", msg.Err)
 		}
 		if msg.Final {
-			return m, tea.Quit // the flushed state is on disk
+			// The flushed state is on disk; take the picture off the terminal
+			// before the program lets go of it.
+			return m, tea.Sequence(m.pic.img.HideCmd(m.pic.caps, m.pic.out), tea.Quit)
 		}
 	case selectMsg:
 		return m, m.loadDetail()
@@ -429,7 +442,14 @@ func (m model) View() string {
 		if m.wrap {
 			body = lipgloss.NewStyle().Width(m.w - listW - 1).Render(body)
 		}
-		return render.FitLines(body, m.w-listW-1, bodyH)
+		if rows := m.chartRows(m.w - listW - 1); rows != "" {
+			body += "\n\n" + rows
+		}
+		// The picture's lines are exactly its box wide; only whole rows are
+		// cut, never a line, so the placeholder cells stay intact.
+		_, ph := m.pictureBox()
+		textH := max(0, bodyH-ph)
+		return render.FitLines(render.FitLines(body, m.w-listW-1, textH)+"\n"+m.pic.img.View(m.pic.caps), m.w-listW-1, bodyH)
 	})
 	title := m.th.Title.Render(app)
 	if m.filtering {
@@ -516,7 +536,21 @@ func main() {
 	if kerr != nil {
 		logger.Printf("keys: %v", kerr)
 	}
+	// Detect once, here: it may run tmux. The model keeps the value.
+	caps := kitty.Detect(os.Getenv, kitty.ExecTmux{})
+	var out kitty.Out
+	if caps.Supported {
+		o, tty, err := kitty.OpenTTY()
+		if err != nil {
+			logger.Printf("kitty: %v", err)
+			caps = kitty.Caps{} // no way to send the picture: draw the alt text
+		} else {
+			defer tty.Close()
+			out = o
+		}
+	}
 	m := model{
+		pic:    newPicture(caps, out),
 		km:     km,
 		saver:  prefs.NewSaver[uiState](app, 0),
 		th:     theme.NewWith(theme.NewRenderer(os.Stdout), theme.DefaultRoles(), theme.DetectGlyphs(app)),

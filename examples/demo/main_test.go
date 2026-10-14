@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/keyolk/tuikit/keys"
+	"github.com/keyolk/tuikit/kitty"
 	"github.com/keyolk/tuikit/list"
 	"github.com/keyolk/tuikit/prefs"
 	"github.com/keyolk/tuikit/theme"
@@ -277,4 +279,71 @@ func TestOpenDismissesTheFailure(t *testing.T) {
 			t.Fatal("open must dismiss the sticky failure")
 		}
 	}
+}
+
+func TestPictureTransmitsOnceAndFits(t *testing.T) {
+	var tty strings.Builder
+	m := testModel(t)
+	m.pic = newPicture(kitty.Caps{Supported: true}, kitty.NewOut(&tty))
+	next, cmd := m.Update(tea.WindowSizeMsg{Width: 60, Height: 14})
+	m = next.(model)
+	for _, msg := range tuitest.Drain(cmd, 0) {
+		if w, ok := msg.(kitty.Wrote); !ok || w.Err != nil {
+			t.Fatalf("resize produced %#v", msg)
+		}
+	}
+	if !strings.Contains(tty.String(), "a=t,t=d,f=100,i=1") || !strings.Contains(tty.String(), "U=1") {
+		t.Fatalf("no transmit and placement on the tty: %q", tty.String()[:min(60, tty.Len())])
+	}
+	if strings.Contains(m.View(), "a=t") {
+		t.Fatal("image bytes leaked into the frame")
+	}
+	if !strings.ContainsRune(m.View(), kitty.PlaceholderRune) {
+		t.Fatal("no placeholder cells in the detail pane")
+	}
+	assertFits(t, m)
+
+	// Same size again: nothing to send.
+	if _, cmd := m.Update(tea.WindowSizeMsg{Width: 60, Height: 14}); len(tuitest.Drain(cmd, 0)) != 0 {
+		t.Fatal("an unchanged picture was sent again")
+	}
+
+	// A failed write is shown, not dropped.
+	next, _ = m.Update(kitty.Wrote{ID: 1, Err: errors.New("tty gone")})
+	if v := next.(model).View(); !strings.Contains(v, "tty gone") {
+		t.Fatalf("write error not shown:\n%s", v)
+	}
+}
+
+func TestPictureFallsBackToAltText(t *testing.T) {
+	m := testModel(t)
+	m.pic = newPicture(kitty.Caps{}, kitty.Out{})
+	next, cmd := m.Update(tea.WindowSizeMsg{Width: 60, Height: 14})
+	m = next.(model)
+	if len(tuitest.Drain(cmd, 0)) != 0 {
+		t.Fatal("no graphics, nothing to send")
+	}
+	if v := m.View(); !strings.Contains(v, "그림 자리") || strings.ContainsRune(v, kitty.PlaceholderRune) {
+		t.Fatalf("alt text missing:\n%s", v)
+	}
+	assertFits(t, m)
+}
+
+// The chart row sits under the detail, inside the frame, and its reading
+// survives with color stripped.
+func TestDetailShowsAChartRow(t *testing.T) {
+	m := testModel(t)
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"load ", "disk ", "%", "◂"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view has no %q:\n%s", want, view)
+		}
+	}
+	assertFits(t, m)
+	t.Setenv("LANG", "ko_KR.UTF-8")
+	m.th = theme.NewWith(lipgloss.NewRenderer(io.Discard), theme.DefaultRoles(), theme.Unicode())
+	if view := ansi.Strip(m.View()); strings.Contains(view, "◂") || !strings.Contains(view, "<") {
+		t.Errorf("a CJK locale gets ASCII charts:\n%s", view)
+	}
+	assertFits(t, m)
 }
