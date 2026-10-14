@@ -42,28 +42,28 @@ func entryOf(b Binding, state func(string) string) Entry {
 // stack first, then any other the help page should document (a detail pane
 // that is closed right now).
 //
-// A binding reachable from several stacks is listed once, with the union of
-// the keys that reach it in any of them, and sections with the same title
+// An action reachable from several stacks or contexts is listed once, with
+// the union of the keys that reach it in any of them, and sections with the same title
 // merge. Disabled bindings are listed — help documents what exists — so only
 // o.State is read. Keys shadowed in every stack are not listed, since
 // pressing them never runs the action. Bindings without Help are omitted.
 func (km Keymap) Help(o Opts, stacks ...[]Ctx) []Section {
 	var out []Section
-	at := map[string]int{}    // group → section
-	entry := map[int][2]int{} // binding → section, entry
+	at := map[string]int{}       // group → section
+	entry := map[string][2]int{} // action → section, entry
 	for _, stack := range stacks {
 		for _, s := range km.reachable(stack, nil) {
 			if s.Help == "" && len(s.Labels) == 0 {
 				continue
 			}
-			if pos, ok := entry[s.i]; ok {
+			if pos, ok := entry[s.Action]; ok {
 				e := &out[pos[0]].Entries[pos[1]]
 				for _, k := range s.Keys {
 					if !slices.Contains(e.Keys, k) {
 						e.Keys = append(e.Keys, k)
 					}
 				}
-				e.Keys = km.inDeclOrder(s.i, e.Keys)
+				e.Keys = km.inDeclOrder(s.Action, e.Keys)
 				continue
 			}
 			e := entryOf(s.Binding, o.State)
@@ -73,20 +73,40 @@ func (km Keymap) Help(o Opts, stacks ...[]Ctx) []Section {
 				at[e.Group] = si
 				out = append(out, Section{Title: e.Group})
 			}
-			entry[s.i] = [2]int{si, len(out[si].Entries)}
+			entry[s.Action] = [2]int{si, len(out[si].Entries)}
 			out[si].Entries = append(out[si].Entries, e)
 		}
 	}
 	return out
 }
 
-// inDeclOrder sorts ks into the order binding i declares them, so a merged
-// entry reads "q/ctrl+c" whichever stack contributed which key.
-func (km Keymap) inDeclOrder(i int, ks []string) []string {
+// Table is the full binding table as help sections: every context on its
+// own, so nothing is hidden by shadowing, each action once. With
+// HelpStyle.Actions it is the reference view a user writes keys.yaml from.
+func (km Keymap) Table(o Opts) []Section {
+	var stacks [][]Ctx
+	seen := map[Ctx]bool{}
+	for _, b := range km.bindings {
+		if !seen[b.Ctx] {
+			seen[b.Ctx] = true
+			stacks = append(stacks, []Ctx{b.Ctx})
+		}
+	}
+	return km.Help(o, stacks...)
+}
+
+// inDeclOrder sorts ks into the order the table declares them for action,
+// so a merged entry reads "q/ctrl+c" whichever stack contributed which key.
+func (km Keymap) inDeclOrder(action string, ks []string) []string {
 	var out []string
-	for _, k := range km.bindings[i].Keys {
-		if slices.Contains(ks, k) {
-			out = append(out, k)
+	for _, b := range km.bindings {
+		if b.Action != action {
+			continue
+		}
+		for _, k := range b.Keys {
+			if slices.Contains(ks, k) && !slices.Contains(out, k) {
+				out = append(out, k)
+			}
 		}
 	}
 	return out
@@ -98,8 +118,11 @@ type HelpStyle struct {
 	Title lipgloss.Style // section titles
 	Key   lipgloss.Style // the key column
 	Desc  lipgloss.Style // the description
-	Muted lipgloss.Style // the "… N more" line
-	Names Names          // how keys are displayed
+	Muted lipgloss.Style // the "… N more" line and the action column
+	// Actions adds a column with each entry's action name: the name a user
+	// writes in keys.yaml (see Keymap.Table).
+	Actions bool
+	Names   Names // how keys are displayed
 }
 
 // RenderHelp lays sections out as lines of at most width cells, showing at
@@ -127,13 +150,25 @@ func RenderHelp(sections []Section, width, height, offset int, st HelpStyle) []s
 		}
 	}
 	keyW = min(keyW, width/3)
+	actW := 0
+	if st.Actions {
+		for _, sec := range sections {
+			for _, e := range sec.Entries {
+				actW = max(actW, ansi.StringWidth(e.Action))
+			}
+		}
+		actW = min(actW, width/3)
+	}
 	descW := max(0, width-keyW-4)
+	if actW > 0 {
+		descW = max(0, descW-actW-2)
+	}
 
 	// A line is a blank separator, a title, or an entry (key set); pieces
 	// stay apart until they are cut to width.
 	type line struct {
-		title, key, desc string
-		entry            bool
+		title, key, desc, action string
+		entry                    bool
 	}
 	var all []line
 	for si, s := range sections {
@@ -142,7 +177,7 @@ func RenderHelp(sections []Section, width, height, offset int, st HelpStyle) []s
 		}
 		all = append(all, line{title: s.Title})
 		for _, e := range s.Entries {
-			all = append(all, line{key: keyText(e), desc: e.Help, entry: true})
+			all = append(all, line{key: keyText(e), desc: e.Help, action: e.Action, entry: true})
 		}
 	}
 	offset = max(0, min(offset, len(all)-1))
@@ -157,7 +192,10 @@ func RenderHelp(sections []Section, width, height, offset int, st HelpStyle) []s
 		switch {
 		case l.entry:
 			s := "  " + st.Key.Render(truncPad(l.key, keyW))
-			if d := ansi.Truncate(l.desc, descW, "…"); d != "" {
+			switch d := ansi.Truncate(l.desc, descW, "…"); {
+			case actW > 0:
+				s += "  " + st.Desc.Render(truncPad(d, descW)) + "  " + st.Muted.Render(ansi.Truncate(l.action, actW, "…"))
+			case d != "":
 				s += "  " + st.Desc.Render(d)
 			}
 			// keyW is at most width/3, so only a width under 3 overflows.

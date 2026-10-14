@@ -121,7 +121,7 @@ func TestOverrideReturnsNewKeymapAndLeavesOriginal(t *testing.T) {
 func TestOverrideUnknownActionsListsThem(t *testing.T) {
 	km := testKeymap()
 	_, err := km.Override(map[string][]string{"nope": {"x"}, "also.nope": {"y"}, "quit": {"Q"}})
-	if err == nil || !strings.Contains(err.Error(), "also.nope, nope") {
+	if err == nil || !strings.Contains(err.Error(), `"also.nope"; unknown action "nope"`) {
 		t.Fatalf("err = %v; want both unknown actions, sorted", err)
 	}
 }

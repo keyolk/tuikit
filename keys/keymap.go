@@ -9,17 +9,12 @@
 package keys
 
 import (
-	"errors"
-	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"gopkg.in/yaml.v3"
 )
 
 // Ctx names a key context: a pane, a modal, a text input, or "global". The app
@@ -33,6 +28,10 @@ type Binding struct {
 	Ctx    Ctx
 	Group  string // help section; empty falls back to the context name
 	Help   string // short description shown in footer, help and palette
+	// Short replaces Help in the footer only, where width is scarce: Help
+	// "toggle request timing", Short "timing". A state label (Labels) still
+	// wins, since it says what the key does now.
+	Short string
 
 	// Labels replaces Help while the action is in a named state, for one key
 	// whose meaning flips with the model: t is "group" until the board is
@@ -87,6 +86,19 @@ func (b Binding) Label(state func(action string) string) string {
 		if l, ok := b.Labels[state(b.Action)]; ok {
 			return l
 		}
+	}
+	return b.Help
+}
+
+// footerLabel is the footer text: a state label, else Short, else Help.
+func (b Binding) footerLabel(state func(string) string) string {
+	if state != nil {
+		if l, ok := b.Labels[state(b.Action)]; ok {
+			return l
+		}
+	}
+	if b.Short != "" {
+		return b.Short
 	}
 	return b.Help
 }
@@ -249,87 +261,54 @@ func (km Keymap) resolveKey(active []Ctx, key string, o Opts) (Binding, bool) {
 	return Binding{}, false
 }
 
-// Override returns a copy of km whose Keys are replaced per Action, for user
-// rebinding. Every binding carrying the action is rebound (an action may be
-// declared in several contexts). Unknown actions are an error listing them,
-// and km is returned unchanged in that case.
-func (km Keymap) Override(o map[string][]string) (Keymap, error) {
-	if len(o) == 0 {
-		return km, nil
-	}
-	known := map[string]bool{}
-	for _, b := range km.bindings {
-		known[b.Action] = true
-	}
-	var unknown []string
-	for a := range o {
-		if !known[a] {
-			unknown = append(unknown, a)
-		}
-	}
-	if len(unknown) > 0 {
-		sort.Strings(unknown)
-		return km, fmt.Errorf("keymap override: unknown actions: %s", strings.Join(unknown, ", "))
-	}
-	bs := km.Bindings()
-	for i := range bs {
-		if ks, ok := o[bs[i].Action]; ok {
-			bs[i].Keys = slices.Clone(ks)
-		}
-	}
-	return Keymap{bindings: bs, index: buildIndex(bs)}, nil
-}
-
-// LoadOverrides reads a YAML file of the form `{action: [keys...]}` and applies
-// it with Override. A missing file is not an error — most users never write
-// one — and returns km unchanged.
-func (km Keymap) LoadOverrides(path string) (Keymap, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return km, nil
-	}
-	if err != nil {
-		return km, fmt.Errorf("keymap override: %w", err)
-	}
-	var o map[string][]string
-	if err := yaml.Unmarshal(data, &o); err != nil {
-		return km, fmt.Errorf("keymap override %s: %w", path, err)
-	}
-	out, err := km.Override(o)
-	if err != nil {
-		return km, fmt.Errorf("%s: %w", path, err)
-	}
-	return out, nil
-}
-
-// shown is a binding as a surface shows it: Keys narrowed to those that still
-// reach it, and i its position in the table (its identity across stacks).
+// shown is an action as a surface shows it: the innermost reachable binding,
+// with Keys widened to every key that still reaches the action in any active
+// context, innermost first.
 type shown struct {
 	Binding
-	i int
 }
 
-// reachable returns the bindings reachable in active, innermost context
-// first, one per action, with Keys narrowed to those not claimed by an
-// enabled binding in a more inner context (dropped entirely when none are
-// left). Surfaces built from it never advertise a key that would do
-// something else.
+// reachable returns one entry per action reachable in active, innermost
+// context first. Keys claimed by an enabled binding in a more inner context
+// are dropped; an action left with no key is dropped. Surfaces built from it
+// never advertise a key that would do something else.
+//
+// An action bound in several contexts (quit as q in a list and ctrl+c
+// globally) is one thing to the user, so it is one entry: the innermost
+// binding's fields, the keys of all of them, Pinned if any is pinned, and
+// the lowest non-zero Footer. Keeping only the innermost binding instead
+// would lose a pinned outer hint behind an unpinned inner one (ccproxy).
 func (km Keymap) reachable(active []Ctx, enabled func(string) bool) []shown {
 	on := func(a string) bool { return enabled == nil || enabled(a) }
 	claimed := map[string]bool{}
-	seen := map[string]bool{}
+	at := map[string]int{} // action → position in out
 	var out []shown
 	for _, ctx := range active {
-		var here []shown
-		for i, b := range km.bindings {
-			if b.Ctx != ctx {
+		for _, b := range km.bindings {
+			if b.Ctx != ctx || !on(b.Action) {
 				continue
 			}
-			if ks := unclaimed(b.Keys, claimed); on(b.Action) && !seen[b.Action] && len(ks) > 0 {
+			ks := unclaimed(b.Keys, claimed)
+			if len(ks) == 0 {
+				continue
+			}
+			i, ok := at[b.Action]
+			if !ok {
 				b = b.clone()
 				b.Keys = ks // only the keys that still reach this binding
-				here = append(here, shown{b, i})
-				seen[b.Action] = true
+				at[b.Action] = len(out)
+				out = append(out, shown{b})
+				continue
+			}
+			m := &out[i].Binding
+			for _, k := range ks {
+				if !slices.Contains(m.Keys, k) {
+					m.Keys = append(m.Keys, k)
+				}
+			}
+			m.Pinned = m.Pinned || b.Pinned
+			if b.Footer > 0 && (m.Footer == 0 || b.Footer < m.Footer) {
+				m.Footer = b.Footer
 			}
 		}
 		// Claim after the whole context is scanned: two bindings in the same
@@ -341,7 +320,6 @@ func (km Keymap) reachable(active []Ctx, enabled func(string) bool) []shown {
 				}
 			}
 		}
-		out = append(out, here...)
 	}
 	return out
 }

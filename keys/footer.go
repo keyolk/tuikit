@@ -20,6 +20,9 @@ type FooterStyle struct {
 	// push a footer measured as fitting past the edge (gcl hints.go).
 	Separator string
 	Names     Names // how keys are displayed
+	// GroupSeparator joins the keys of a FooterGroup hint ("j/k"). Empty
+	// concatenates single-cell names ("hjkl", "↑↓") and uses "/" otherwise.
+	GroupSeparator string
 }
 
 // hint is one footer entry: a binding, or a FooterGroup of them.
@@ -62,7 +65,7 @@ func (km Keymap) Footer(active []Ctx, width int, o Opts, st FooterStyle) string 
 			h.pinned = h.pinned || b.Pinned
 			continue
 		}
-		h := hint{keys: []string{b.Key()}, label: b.Label(o.State), prio: b.Footer, pinned: b.Pinned}
+		h := hint{keys: []string{b.Key()}, label: b.footerLabel(o.State), prio: b.Footer, pinned: b.Pinned}
 		if b.FooterGroup != "" {
 			h.label = b.FooterGroup
 			at[b.FooterGroup] = len(hints)
@@ -82,7 +85,15 @@ func (km Keymap) Footer(active []Ctx, width int, o Opts, st FooterStyle) string 
 	sort.SliceStable(pinned, func(i, j int) bool { return pinned[i].prio < pinned[j].prio })
 
 	draw := func(h hint) string {
-		k := st.Key.Render(st.Names.Join(h.keys))
+		ks := st.Names.Join(h.keys)
+		if st.GroupSeparator != "" {
+			names := make([]string, len(h.keys))
+			for i, k := range h.keys {
+				names[i] = st.Names.Name(k)
+			}
+			ks = strings.Join(names, st.GroupSeparator)
+		}
+		k := st.Key.Render(ks)
 		if h.label == "" {
 			return k
 		}
