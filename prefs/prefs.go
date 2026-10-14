@@ -6,6 +6,10 @@
 // a tea.Cmd, off the UI loop. ghx wrote its repo store non-atomically inside
 // Update and dropped the error; a crash mid-write then left a truncated file
 // that failed to parse on the next start.
+//
+// Writes are ordered: an older write never lands over a newer one, however
+// the command goroutines are scheduled. Saver adds a debounce and a Flush for
+// quit on top; SaveCmd is the one-shot form.
 package prefs
 
 import (
@@ -14,6 +18,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -72,11 +78,12 @@ func clone[T any](v T) (T, error) {
 	return out, nil
 }
 
-// Saved reports the outcome of a SaveCmd. Surface Err (a toast); do not drop
-// it.
+// Saved reports the outcome of a write. Surface Err (a toast); do not drop
+// it. Final marks the write a Saver.Flush asked for: quit on it.
 type Saved struct {
-	App string
-	Err error
+	App   string
+	Err   error
+	Final bool
 }
 
 // SaveCmd returns a command that writes v for app atomically with mode 0600.
@@ -90,8 +97,35 @@ func SaveCmd[T any](app string, v T) tea.Cmd {
 		err = fmt.Errorf("prefs: encode: %w", err)
 		return func() tea.Msg { return Saved{App: app, Err: err} }
 	}
-	path := Path(app)
-	return func() tea.Msg { return Saved{App: app, Err: writeAtomic(path, append(data, '\n'))} }
+	return writeCmd(app, append(data, '\n'), false)
+}
+
+// Writes are ordered by a sequence number taken when the command is built,
+// in Update, which Bubble Tea runs on one goroutine: a later Update always
+// gets a larger number. Commands run on their own goroutines in any order,
+// so each write takes writeMu and skips itself when a newer write for the
+// same path already landed — an older write never overwrites a newer one.
+// This state is process-wide because the files are.
+var (
+	seq     atomic.Uint64
+	writeMu sync.Mutex
+	landed  = map[string]uint64{} // path → seq of the newest write on disk
+)
+
+func writeCmd(app string, data []byte, final bool) tea.Cmd {
+	path, n := Path(app), seq.Add(1)
+	return func() tea.Msg {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		if landed[path] > n {
+			return Saved{App: app, Final: final} // superseded; the newer data is on disk
+		}
+		err := writeAtomic(path, data)
+		if err == nil {
+			landed[path] = n
+		}
+		return Saved{App: app, Err: err, Final: final}
+	}
 }
 
 // writeAtomic writes data to a temp file beside path and renames it over
