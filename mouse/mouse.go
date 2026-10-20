@@ -14,6 +14,8 @@
 package mouse
 
 import (
+	"time"
+
 	"github.com/charmbracelet/bubbletea"
 	"github.com/keyolk/tuikit/list"
 )
@@ -110,23 +112,103 @@ type Click struct {
 // HasItem is false in that case, so the caller can ignore the click rather
 // than selecting a phantom row.
 func ListHit[T list.Item](l list.List[T], r Rect, msg tea.MouseMsg) Click {
+	start, _ := l.Window()
+	return RowHit(r, start, l.Len(), msg)
+}
+
+// RowHit maps a mouse event to an item in a one-line-per-item list drawn in
+// r whose first visible item is offset, for apps that keep their own cursor
+// instead of a list.List.
+func RowHit(r Rect, offset, total int, msg tea.MouseMsg) Click {
 	c := Click{Index: -1}
 	if !r.Contains(msg.X, msg.Y) {
 		return c
 	}
 	c.Visible = true
-	start, _ := l.Window()
-	local := msg.Y - r.Y
-	if local < 0 || local >= r.Rows() {
-		return c
-	}
-	idx := start + local
-	if idx < 0 || idx >= l.Len() {
+	idx := offset + msg.Y - r.Y
+	if idx < 0 || idx >= total {
 		return c
 	}
 	c.Index = idx
 	c.HasItem = true
 	return c
+}
+
+// BlockHit maps a mouse event to an item in a list whose items take several
+// lines each — cards, entries with a group header — drawn in r starting at
+// item first. heights[i] is the line count of item i as drawn. A click on a
+// card's second line selects that card, not whatever item a one-line-per-row
+// count would land on.
+func BlockHit(r Rect, first int, heights []int, msg tea.MouseMsg) Click {
+	c := Click{Index: -1}
+	if !r.Contains(msg.X, msg.Y) {
+		return c
+	}
+	c.Visible = true
+	line := msg.Y - r.Y
+	for i := max(0, first); i < len(heights); i++ {
+		if line < heights[i] {
+			c.Index = i
+			c.HasItem = true
+			return c
+		}
+		line -= heights[i]
+	}
+	return c
+}
+
+// SplitColumns divides r into n equal-width columns separated by gap cells,
+// the arithmetic a board view uses to lay its columns out. The last column
+// takes any remainder so the columns cover r exactly.
+func SplitColumns(r Rect, n, gap int) []Rect {
+	if n <= 0 {
+		return nil
+	}
+	w := (r.W - gap*(n-1)) / n
+	out := make([]Rect, n)
+	x := r.X
+	for i := range out {
+		cw := w
+		if i == n-1 {
+			cw = r.X + r.W - x
+		}
+		out[i] = Rect{X: x, Y: r.Y, W: max(0, cw), H: r.H}
+		x += w + gap
+	}
+	return out
+}
+
+// Column returns the index of the rect in cols containing (x, y), or -1.
+func Column(cols []Rect, x, y int) int {
+	for i, c := range cols {
+		if c.Contains(x, y) {
+			return i
+		}
+	}
+	return -1
+}
+
+// DoubleClickWindow is how close two presses on the same target must be to
+// count as a double click.
+const DoubleClickWindow = 400 * time.Millisecond
+
+// Clicks detects a double click on the same target. It is a value: keep it on
+// the model and replace it with what Press returns, so Update stays pure.
+//
+// The fleet convention is that one click selects and a second click on the
+// selected target activates — the mouse form of Enter. Activating on a single
+// click made the first click on a row do something the user had not chosen.
+type Clicks struct {
+	key  string
+	at   time.Time
+	done bool
+}
+
+// Press records a press on target key at now and reports whether it completes
+// a double click. A completed double click is not reused by a third press.
+func (c Clicks) Press(key string, now time.Time) (Clicks, bool) {
+	double := !c.done && key != "" && key == c.key && now.Sub(c.at) <= DoubleClickWindow
+	return Clicks{key: key, at: now, done: double}, double
 }
 
 // SelectByClick returns a new list with the cursor moved to the clicked row,

@@ -1,6 +1,8 @@
 package mouse
 
 import (
+	"time"
+
 	"testing"
 
 	"github.com/charmbracelet/bubbletea"
@@ -172,5 +174,80 @@ func TestProgramOptionsNonEmpty(t *testing.T) {
 	opts := ProgramOptions()
 	if len(opts) == 0 {
 		t.Fatal("ProgramOptions should return at least one option")
+	}
+}
+
+func TestRowHitUsesOffset(t *testing.T) {
+	r := Rect{X: 0, Y: 4, W: 30, H: 6}
+	hit := RowHit(r, 10, 20, msg(1, 6, tea.MouseButtonLeft, tea.MouseActionPress))
+	if !hit.HasItem || hit.Index != 12 {
+		t.Fatalf("got %+v, want index 12", hit)
+	}
+	if RowHit(r, 18, 20, msg(1, 9, tea.MouseButtonLeft, tea.MouseActionPress)).HasItem {
+		t.Fatal("a row past the last item must not hit")
+	}
+}
+
+func TestBlockHitLandsOnTheCardNotTheLine(t *testing.T) {
+	// Cards of 3, 2 and 4 lines, scrolled so card 1 is the first visible.
+	r := Rect{X: 0, Y: 1, W: 20, H: 10}
+	heights := []int{3, 2, 4}
+	cases := []struct{ y, want int }{
+		{1, 1}, {2, 1}, // both lines of card 1
+		{3, 2}, {6, 2}, // first and last line of card 2
+	}
+	for _, c := range cases {
+		hit := BlockHit(r, 1, heights, msg(0, c.y, tea.MouseButtonLeft, tea.MouseActionPress))
+		if !hit.HasItem || hit.Index != c.want {
+			t.Errorf("y=%d got %+v want card %d", c.y, hit, c.want)
+		}
+	}
+	if BlockHit(r, 1, heights, msg(0, 7, tea.MouseButtonLeft, tea.MouseActionPress)).HasItem {
+		t.Fatal("a line below the last card must not hit")
+	}
+}
+
+func TestSplitColumnsCoversTheRectWithGaps(t *testing.T) {
+	cols := SplitColumns(Rect{X: 0, Y: 2, W: 83, H: 5}, 4, 1)
+	if len(cols) != 4 {
+		t.Fatalf("got %d columns", len(cols))
+	}
+	if cols[0].W != 20 || cols[1].X != 21 {
+		t.Errorf("unexpected layout %+v", cols)
+	}
+	last := cols[3]
+	if last.X+last.W != 83 {
+		t.Errorf("last column ends at %d, want 83", last.X+last.W)
+	}
+	if Column(cols, 20, 3) != -1 {
+		t.Error("the gap between columns belongs to no column")
+	}
+	if Column(cols, 21, 3) != 1 {
+		t.Error("x=21 is column 1")
+	}
+}
+
+func TestClicksNeedTheSameTargetInTime(t *testing.T) {
+	t0 := time.Unix(0, 0)
+	var c Clicks
+	c, d := c.Press("a", t0)
+	if d {
+		t.Fatal("a first click is not a double click")
+	}
+	c, d = c.Press("a", t0.Add(200*time.Millisecond))
+	if !d {
+		t.Fatal("a second click on the same target in time is a double click")
+	}
+	c, d = c.Press("a", t0.Add(300*time.Millisecond))
+	if d {
+		t.Fatal("a third click must not reuse the double click")
+	}
+	c, d = c.Press("b", t0.Add(400*time.Millisecond))
+	if d {
+		t.Fatal("a different target is not a double click")
+	}
+	_, d = c.Press("b", t0.Add(time.Second))
+	if d {
+		t.Fatal("a slow second click is not a double click")
 	}
 }
