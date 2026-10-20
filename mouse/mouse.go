@@ -198,6 +198,14 @@ const DoubleClickWindow = 400 * time.Millisecond
 // The fleet convention is that one click selects and a second click on the
 // selected target activates — the mouse form of Enter. Activating on a single
 // click made the first click on a row do something the user had not chosen.
+//
+// Callers must reset the detector (assign Clicks{}) on every key event, in the
+// top-level key arm of Update before dispatching the key. Press sees only mouse
+// presses, so without the reset "click a row, j, k, click the same row" inside
+// the window reads as a double click and activates a row the user only meant to
+// select. Do not reset inside the key handler itself: mouse handlers often call
+// it with a synthetic Enter or wheel key, and a reset there would break the pair
+// that synthetic key is completing.
 type Clicks struct {
 	key  string
 	at   time.Time
