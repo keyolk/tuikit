@@ -117,6 +117,11 @@ type Result struct {
 	// pane's offset after the scroll, Pane.Offset+Scroll, and is the safer
 	// one to apply: it does not depend on the app's own scroll value staying
 	// in range (an unclamped detail offset would swallow a -1).
+	//
+	// A pane whose window follows a cursor (list.List, render.Window) must
+	// move the cursor into the new window too: setting the offset alone is
+	// undone by the next View, which scrolls back to the cursor, and the
+	// drag then never gets past the edge.
 	Scroll     int
 	ScrollPane string
 	Offset     int
@@ -143,11 +148,16 @@ func (s Selection) NextTick() (msg AutoScrollMsg, ok bool) {
 }
 
 // AutoScrollInterval is how often a drag resting past a pane's edge scrolls
-// one more line.
+// one more line, for every Selection whose Interval is zero.
 var AutoScrollInterval = 50 * time.Millisecond
 
 // Selection is the selection state. The zero value has no selection.
 type Selection struct {
+	// Interval replaces AutoScrollInterval for this Selection; zero uses the
+	// package value. A test sets it on its own value instead of writing the
+	// package variable, which every parallel test reads.
+	Interval time.Duration
+
 	pane     string
 	anchor   Point
 	focus    Point
@@ -190,7 +200,8 @@ func (s Selection) Wants(msg tea.MouseMsg) bool {
 // engine's selection.
 func (s *Selection) Clear() {
 	*s = Selection{
-		lastAt: s.lastAt, lastPane: s.lastPane, lastCell: s.lastCell, pressRuns: s.pressRuns,
+		Interval: s.Interval,
+		lastAt:   s.lastAt, lastPane: s.lastPane, lastCell: s.lastCell, pressRuns: s.pressRuns,
 		// Generations only grow, so a tick still in flight can never match
 		// the next drag's.
 		autoGen: s.autoGen,
@@ -358,7 +369,7 @@ func (s *Selection) drag(x, y int, panes []Pane) Result {
 		s.autoPending = true
 		s.autoGen++
 		gen := s.autoGen
-		r.AutoScroll = tea.Tick(AutoScrollInterval, func(time.Time) tea.Msg { return AutoScrollMsg{gen: gen} })
+		r.AutoScroll = tea.Tick(s.interval(), func(time.Time) tea.Msg { return AutoScrollMsg{gen: gen} })
 	}
 	return r
 }
@@ -370,6 +381,13 @@ func (s *Selection) release(panes []Pane, frame *lazyFrame) Result {
 		return Result{}
 	}
 	return Result{Consumed: true, Copy: s.text(panes, frame)}
+}
+
+func (s *Selection) interval() time.Duration {
+	if s.Interval > 0 {
+		return s.Interval
+	}
+	return AutoScrollInterval
 }
 
 func (s *Selection) stopAuto() {

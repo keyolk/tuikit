@@ -20,41 +20,32 @@ package link
 import (
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
-	"regexp"
 	"runtime"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/keyolk/tuikit/keys"
+	"github.com/keyolk/tuikit/link/urls"
+	"github.com/keyolk/tuikit/render"
 )
 
-// maxURL is the longest URL that is linked. Terminals cap OSC 8 URIs
-// (VTE at 2083 bytes) and drop longer ones, sometimes with the text.
-const maxURL = 2048
+// maxURL is the longest URL that is linked (urls.MaxLen).
+const maxURL = urls.MaxLen
 
 // Valid reports whether u is an absolute http or https URL with a host and
 // nothing a terminal escape could be smuggled through (control characters,
-// spaces).
-func Valid(u string) bool {
-	if u == "" || len(u) > maxURL {
-		return false
-	}
-	for i := 0; i < len(u); i++ {
-		if c := u[i]; c <= ' ' || c == 0x7f {
-			return false
-		}
-	}
-	p, err := url.Parse(u)
-	if err != nil || p.Host == "" {
-		return false
-	}
-	return p.Scheme == "http" || p.Scheme == "https"
-}
+// spaces). It is urls.Valid; import link/urls where Bubble Tea is not
+// wanted. Valid accepts URLs that carry credentials; see Sensitive.
+func Valid(u string) bool { return urls.Valid(u) }
+
+// Sensitive reports whether u carries userinfo or a credential-like query
+// or fragment key (urls.Sensitive). Valid does not reject such URLs: the
+// caller decides, and a tool showing captured traffic keeps them plain text
+// (neither Wrap nor Open them).
+func Sensitive(u string) bool { return urls.Sensitive(u) }
 
 // Wrap returns text as an OSC 8 hyperlink to u. A u that is not Valid
 // returns text unchanged, so a bad URL costs the link, not the label. An
@@ -70,25 +61,7 @@ func Wrap(u, text string) string {
 	if text == "" || !Valid(u) {
 		return text
 	}
-	return "\x1b]8;;" + asciiURL(u) + "\x1b\\" + text + "\x1b]8;;\x1b\\"
-}
-
-// asciiURL percent-encodes every non-ASCII byte of u, as browsers do.
-func asciiURL(u string) string {
-	for i := 0; i < len(u); i++ {
-		if u[i] >= 0x80 {
-			var b strings.Builder
-			for j := 0; j < len(u); j++ {
-				if c := u[j]; c >= 0x80 {
-					fmt.Fprintf(&b, "%%%02X", c)
-				} else {
-					b.WriteByte(c)
-				}
-			}
-			return b.String()
-		}
-	}
-	return u
+	return "\x1b]8;;" + urls.Encode(u) + "\x1b\\" + text + "\x1b]8;;\x1b\\"
 }
 
 // Span links the part of a row between prefix and suffix: markers, padding
@@ -97,38 +70,30 @@ func Span(u, prefix, text, suffix string) string {
 	return prefix + Wrap(u, text) + suffix
 }
 
-var urlPattern = regexp.MustCompile(`https?://[^\s<>"'` + "`" + `]+`)
+// Cell is text as a table cell exactly w cells wide that links to u: text is
+// cut to w with ellipsis (render.Ellipsis() is the usual one, "" cuts hard),
+// only the text is linked, and the padding stays outside the link so a
+// cmd+click on the blank part of the cell opens nothing. okx wrote this by
+// hand as linkCell.
+func Cell(u, text string, w int, ellipsis string) string {
+	if w <= 0 {
+		return ""
+	}
+	t := render.TruncateMarker(text, w, ellipsis)
+	return render.PadRight(Wrap(u, t), w)
+}
 
 // Find returns the http and https URLs in text, in order, escapes ignored.
 // Trailing sentence punctuation is not part of a URL ("see https://x.io/a."),
 // and neither is a closing bracket that has no opening one in the URL
 // ("(https://x.io/a)").
-func Find(text string) []string {
-	var out []string
-	for _, u := range urlPattern.FindAllString(ansi.Strip(text), -1) {
-		u = trimURL(u)
-		if Valid(u) {
-			out = append(out, u)
-		}
-	}
-	return out
-}
+func Find(text string) []string { return urls.Find(ansi.Strip(text)) }
 
-func trimURL(u string) string {
-	for u != "" {
-		last := u[len(u)-1]
-		switch {
-		case strings.IndexByte(".,;:!?", last) >= 0:
-			u = u[:len(u)-1]
-		case last == ')' && strings.Count(u, "(") < strings.Count(u, ")"),
-			last == ']' && strings.Count(u, "[") < strings.Count(u, "]"):
-			u = u[:len(u)-1]
-		default:
-			return u
-		}
-	}
-	return u
-}
+// FindIndex returns the byte ranges of the URLs in plain text, by the rules
+// of Find (urls.FindIndex). Use it to link URLs in text that is wrapped
+// first: wrap the plain text, find the ranges in each line, and Wrap them
+// after. Wrapping a linked string splits the escape across lines.
+func FindIndex(text string) [][2]int { return urls.FindIndex(text) }
 
 // OpenedMsg reports the result of Open or OpenFirst.
 type OpenedMsg struct {
@@ -143,6 +108,14 @@ type OpenedMsg struct {
 // not an http(s) URL. An app that filters with Valid before Open never sees
 // it; a test can assert on it to prove the app's own filter.
 func (m OpenedMsg) Refused() bool { return errors.Is(m.Err, ErrInvalid) }
+
+// IsError reports whether the result deserves an error toast: an opener
+// failure, ErrRemote, a refused URL. It is false on success and for
+// ErrNoLink, which is an answer ("no link here") rather than a failure, so
+// apps pick the toast level from it instead of testing Err themselves.
+func (m OpenedMsg) IsError() bool {
+	return m.Err != nil && !errors.Is(m.Err, ErrNoLink)
+}
 
 // Notes is the text of the result toasts. Replace the fields for a UI in
 // another language; %s is the URL or the error, %d the count.
@@ -198,18 +171,30 @@ var Launcher = launch
 // Open opens u in the browser off the UI thread and reports OpenedMsg. It
 // runs the platform opener with u as one argument, never through a shell,
 // and with no terminal attached, so the opener cannot draw over the TUI.
-func Open(u string) tea.Cmd {
+func Open(u string) tea.Cmd { return OpenWith(nil, u) }
+
+// OpenWith is Open through launch instead of Launcher: an app whose config
+// names its own opener (ccx's browser command) passes it here rather than
+// assigning the package-wide Launcher, which every other caller and test
+// shares. A nil launch means Launcher. launch runs off the UI goroutine and
+// gets only a Valid URL.
+func OpenWith(launch func(string) error, u string) tea.Cmd {
 	return func() tea.Msg {
 		if !Valid(u) {
 			return OpenedMsg{URL: u, Err: ErrInvalid}
 		}
-		return OpenedMsg{URL: u, Err: Launcher(u)}
+		if launch == nil {
+			launch = Launcher
+		}
+		return OpenedMsg{URL: u, Err: launch(u)}
 	}
 }
 
 // OpenFirst opens the first of urls and says how many there were (a message
 // or a card often carries several). With no URL it opens nothing and reports
-// ErrNoLink, so the key still answers. Invalid URLs are skipped, not opened.
+// ErrNoLink, so the key still answers. Invalid URLs are skipped, not opened,
+// and not counted: Of is the number of Valid URLs, so "the first of 3" never
+// counts a file: link the user could not have opened.
 func OpenFirst(urls []string) tea.Cmd {
 	var valid []string
 	for _, u := range urls {
@@ -240,7 +225,7 @@ func launch(u string) error {
 	}
 	// Valid already holds: u starts with http, so the opener cannot read it
 	// as a flag. Stdin, stdout and stderr stay nil (/dev/null).
-	return exec.Command(name, asciiURL(u)).Run()
+	return exec.Command(name, urls.Encode(u)).Run()
 }
 
 // Action is the binding name for opening the selected item's link.
@@ -251,4 +236,12 @@ const Action = "link.open"
 // none, it shows that instead of doing nothing.
 func Binding(ctx keys.Ctx) keys.Binding {
 	return keys.Binding{Action: Action, Keys: []string{"o"}, Ctx: ctx, Help: "open link"}
+}
+
+// BindingWith is Binding placed in a help group and given a footer priority
+// (0 keeps it out of the footer), the two fields every adopter set by hand.
+func BindingWith(ctx keys.Ctx, group string, footer int) keys.Binding {
+	b := Binding(ctx)
+	b.Group, b.Footer = group, footer
+	return b
 }
