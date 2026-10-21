@@ -456,3 +456,25 @@ func TestNewFieldsDoNotAlias(t *testing.T) {
 		t.Fatal("Help must not hand out the table's keys")
 	}
 }
+
+func TestHelpLinesIsEveryLineWithoutTheMarker(t *testing.T) {
+	secs := testKeymap().Help(Opts{}, []Ctx{ctxList, ctxGlobal})
+	st := HelpStyle{Ellipsis: "~"}
+	all := HelpLines(secs, 30, st)
+	if len(all) != HelpLineCount(secs, 30) {
+		t.Fatalf("HelpLines has %d lines, HelpLineCount says %d", len(all), HelpLineCount(secs, 30))
+	}
+	for _, l := range all {
+		if strings.HasSuffix(l, " more") {
+			t.Fatalf("HelpLines drew a marker: %q", l)
+		}
+	}
+	// A page of it is the same text RenderHelp draws for that page.
+	page, _ := RenderHelp(secs, 30, len(all), 0, st)
+	if strings.Join(page, "\n") != strings.Join(all, "\n") {
+		t.Fatal("HelpLines differs from RenderHelp at full height")
+	}
+	if HelpLines(secs, 0, st) != nil {
+		t.Fatal("width 0 must draw nothing")
+	}
+}

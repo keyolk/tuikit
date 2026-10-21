@@ -318,3 +318,15 @@ func Filter(entries []Entry, query string) []Entry {
 	}
 	return out
 }
+
+// HelpLines is every help line at width, with no height cut and no `… N
+// more` marker: the full content a scrolling help pane passes as
+// selection.Pane.Lines, or a View that windows the help itself.
+func HelpLines(sections []Section, width int, st HelpStyle) []string {
+	n := HelpLineCount(sections, width)
+	if n == 0 {
+		return nil
+	}
+	lines, _ := RenderHelp(sections, width, n, 0, st)
+	return lines
+}
