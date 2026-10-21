@@ -48,3 +48,12 @@ func TestDrainSingleAndNil(t *testing.T) {
 		t.Fatalf("quick timer = %v", got)
 	}
 }
+
+func TestReversed(t *testing.T) {
+	frame := "ab\x1b[7mcd\x1b[0mef\x1b[38;5;7mgh\x1b[1;7mi\x1b]8;;https://x.io\x1b\\j\x1b]8;;\x1b\\\nk\x1b[27ml\x1b[7m\x1b[m"
+	got := Reversed(frame)
+	want := []string{"cd", "ij", "k"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Reversed = %q, want %q", got, want)
+	}
+}

@@ -9,34 +9,54 @@
 //     that pane, so a drag never reaches into a neighbor. Rows run across
 //     lines inside the pane.
 //   - Dragging past the top or bottom of a text pane asks the app to scroll it
-//     (Result.Scroll) and the selection keeps the lines that scrolled out,
-//     because a text pane gives its whole content (Pane.Lines), not just the
-//     visible rows.
+//     (Result.Scroll, Result.Offset) and the selection keeps the lines that
+//     scrolled out, because a text pane gives its whole content (Pane.Lines),
+//     not just the visible rows. While the pointer rests past the edge the
+//     scroll goes on by itself (Result.AutoScroll), as the engine does: a
+//     terminal sends no motion for a pointer that does not move.
 //   - In a text pane a double click selects a word and a triple click a line.
 //     List panes keep the fleet convention (E14): the second click on the
 //     selected row is the Enter action, so multi-click selection is off there.
 //   - Releasing copies the text (Copy), and the highlight stays until the next
 //     press or key, as the engine does with copyOnSelect.
 //
-// A press that does not move is still a click: Mouse leaves it to the app
-// (Result.Consumed is false), so click-to-select and wheel keep working.
+// A press that does not move is still a click: the selection leaves it to the
+// app (Result.Consumed is false), so click-to-select and wheel keep working.
+//
+// # Wiring
+//
+// In Update, feed every message to Update before the app's own mouse
+// handling, and Clear on every key, where mouse.Clicks is reset:
+//
+//	case tea.MouseMsg, selection.AutoScrollMsg:
+//		r, cmd := m.sel.Update(msg, m.panes, m.frame, time.Now())
+//		if r.Scroll != 0 {
+//			m.setOffset(r.ScrollPane, r.Offset)
+//		}
+//		if r.Consumed {
+//			return m, cmd
+//		}
+//		// the app's click and wheel handling; batch cmd with its command
+//
+// m.frame is View before Render (see Render), and it runs only when the
+// selection needs it. At the end of View, draw the highlight:
+//
+//	return m.sel.Render(frame, m.panes(), selection.DefaultStyle())
+//
+// The selection sees an event before the app does, so a press is hit-tested
+// against the layout on screen. If the app's click handler then changes the
+// layout (moves focus, scrolls to keep a cursor visible), the selection's
+// anchor still names the line that was clicked.
 package selection
 
 import (
-	"encoding/base64"
-	"os"
-	"os/exec"
-	"regexp"
-	"runtime"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/keyolk/tuikit/mouse"
-	"github.com/keyolk/tuikit/render"
 )
 
 // Kind decides what a double click means in a pane.
@@ -52,37 +72,66 @@ const (
 
 // Pane is one region a selection can live in, with the numbers View drew it
 // with. Pass the panes in drawing order; the last one containing a point wins,
-// so an overlay listed after the base owns its area.
+// so an overlay listed after the base owns its area. While an overlay is open,
+// pass only its panes: the base must not be selectable under a modal.
 type Pane struct {
 	ID   string
 	Rect mouse.Rect
 	Kind Kind
-	// Lines is the pane's full content, styled or plain, one entry per drawn
-	// line, and Offset the index of the line drawn at Rect.Y. A pane that sets
-	// Lines can be scrolled by a drag and keeps the lines that scroll out. A
-	// pane without Lines is read from the frame and cannot scroll.
+	// Lines is the pane's full content, styled or plain, one entry per line as
+	// drawn: after wrapping, never the source lines a wrap splits. Offset is
+	// the index of the line drawn at Rect.Y. A pane that sets Lines can be
+	// scrolled by a drag and keeps the lines that scroll out. A pane without
+	// Lines is read from the frame and cannot scroll.
+	//
+	// Rect.H counts only the rows that draw Lines[Offset:]. Leave out rows the
+	// pane draws below them, such as a `… N more` marker: Lines does not hold
+	// them, so counting them shifts nothing on screen but lets a drag past the
+	// last drawn line stop short of scrolling.
 	Lines  []string
 	Offset int
+	// LineX is the cell column of each Lines entry drawn at Rect.X. Set it
+	// when the lines carry a gutter (line numbers, a marker column) the pane
+	// does not want selected: Lines keeps the gutter, Rect starts after it.
+	LineX int
 }
 
 // Point is a cell in a pane: Row is a line of Pane.Lines (or a row of the
 // pane's rect when it has no Lines), Col a cell column inside the rect.
 type Point struct{ Row, Col int }
 
-// Result says what Mouse did with an event.
+// Result says what the selection did with an event.
 type Result struct {
 	// Consumed: the event belongs to the selection (a drag, the release that
 	// ends one, a word or line pick). The app must not also treat it as a
-	// click.
+	// click. A press that does not move is never consumed, so the app's own
+	// click always runs; Consumed only matters for the events after it.
 	Consumed bool
 	// Copy is the selected text, set once when a selection is finished.
-	// Pass it to Copy.
+	// Update already returns Copy(Copy) as its command.
 	Copy string
 	// Scroll asks the app to scroll pane ScrollPane by this many lines
-	// (negative is up), because a drag went past its edge.
+	// (negative is up), because a drag went past its edge. Offset is that
+	// pane's offset after the scroll, Pane.Offset+Scroll, and is the safer
+	// one to apply: it does not depend on the app's own scroll value staying
+	// in range (an unclamped detail offset would swallow a -1).
 	Scroll     int
 	ScrollPane string
+	Offset     int
+	// AutoScroll keeps a drag scrolling while the pointer rests past the
+	// pane's edge. It is a tea.Tick that delivers an AutoScrollMsg; return it
+	// from Update and feed the message back. Update returns it batched with
+	// the copy.
+	AutoScroll tea.Cmd
 }
+
+// AutoScrollMsg is the tick behind Result.AutoScroll. Feed it to Update (or
+// Tick); a tick from an earlier drag is ignored.
+type AutoScrollMsg struct{ gen int }
+
+// AutoScrollInterval is how often a drag resting past a pane's edge scrolls
+// one more line.
+var AutoScrollInterval = 50 * time.Millisecond
 
 // Selection is the selection state. The zero value has no selection.
 type Selection struct {
@@ -92,6 +141,11 @@ type Selection struct {
 	active   bool // a range exists and is drawn
 	dragging bool
 	moved    bool
+
+	// The last pointer cell of the drag, replayed by an auto-scroll tick.
+	lastX, lastY int
+	autoGen      int
+	autoPending  bool
 
 	lastAt    time.Time
 	lastPane  string
@@ -109,11 +163,25 @@ func (s Selection) Active() bool { return s.active }
 // Dragging reports whether the left button is down on a selection.
 func (s Selection) Dragging() bool { return s.dragging }
 
+// Wants reports whether msg changes the selection. The app can skip building
+// panes and frames for every other event (wheel, plain motion, right click).
+func (s Selection) Wants(msg tea.MouseMsg) bool {
+	if mouse.IsLeftPress(msg) {
+		return true
+	}
+	return s.dragging && (msg.Action == tea.MouseActionMotion || msg.Action == tea.MouseActionRelease)
+}
+
 // Clear drops the selection. Call it on every key event, in the same place the
 // mouse.Clicks detector is reset: a key is the "next action" that ends the
 // engine's selection.
 func (s *Selection) Clear() {
-	*s = Selection{lastAt: s.lastAt, lastPane: s.lastPane, lastCell: s.lastCell, pressRuns: s.pressRuns}
+	*s = Selection{
+		lastAt: s.lastAt, lastPane: s.lastPane, lastCell: s.lastCell, pressRuns: s.pressRuns,
+		// Generations only grow, so a tick still in flight can never match
+		// the next drag's.
+		autoGen: s.autoGen,
+	}
 }
 
 // Range returns the selection's pane and its start and end, start first.
@@ -128,23 +196,86 @@ func (s Selection) Range() (pane string, start, end Point, ok bool) {
 	return s.pane, a, b, true
 }
 
-// Mouse feeds one mouse event. frame is the current View() output, used to
-// read panes without Lines; now is injectable for tests.
+// Update is the one call an app's Update needs. It takes a tea.MouseMsg or an
+// AutoScrollMsg (anything else is ignored), builds panes and the frame only
+// when the event needs them, and returns the Result with a command that
+// copies a finished selection and keeps an auto-scroll going.
+//
+// frame must be View before Render: the selection reads the frame to copy
+// panes without Lines, and a frame that already has the highlight would copy
+// the highlight's styling with it.
+func (s *Selection) Update(msg tea.Msg, panes func() []Pane, frame func() string, now time.Time) (Result, tea.Cmd) {
+	var r Result
+	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		if !s.Wants(msg) {
+			return Result{}, nil
+		}
+		r = s.Feed(msg, panes(), frame, now)
+	case AutoScrollMsg:
+		r = s.Tick(msg, panes())
+	default:
+		return Result{}, nil
+	}
+	return r, tea.Batch(Copy(r.Copy), r.AutoScroll)
+}
+
+// Mouse feeds one mouse event. frame is the current View() output before
+// Render, used to read panes without Lines; now is injectable for tests.
+// Feed takes the frame lazily; Update also builds the panes lazily.
 func (s *Selection) Mouse(msg tea.MouseMsg, panes []Pane, frame string, now time.Time) Result {
+	return s.Feed(msg, panes, func() string { return frame }, now)
+}
+
+// Feed is Mouse with the frame built only when the event reads it: a press
+// on a pane without Lines, a word or line pick, the release that copies.
+func (s *Selection) Feed(msg tea.MouseMsg, panes []Pane, frame func() string, now time.Time) Result {
+	lazy := &lazyFrame{build: frame}
 	switch {
 	case mouse.IsLeftPress(msg):
-		return s.press(msg, panes, frame, now)
-	case msg.Action == tea.MouseActionMotion && s.dragging:
-		return s.drag(msg, panes)
-	case msg.Action == tea.MouseActionRelease && s.dragging:
-		return s.release(panes, frame)
+		return s.press(msg, panes, lazy, now)
+	case msg.Action == tea.MouseActionMotion && s.dragging && msg.Button == tea.MouseButtonLeft:
+		return s.drag(msg.X, msg.Y, panes)
+	case msg.Action == tea.MouseActionRelease && s.dragging,
+		// Motion with no button held means the release was lost (it happened
+		// outside the window). Hover must never extend a selection, so the
+		// drag ends here as if released.
+		msg.Action == tea.MouseActionMotion && s.dragging && msg.Button == tea.MouseButtonNone:
+		return s.release(panes, lazy)
 	}
 	return Result{}
 }
 
-func (s *Selection) press(msg tea.MouseMsg, panes []Pane, frame string, now time.Time) Result {
+// Tick handles an AutoScrollMsg: while the drag still rests past a pane's
+// edge it scrolls one more line and schedules the next tick.
+func (s *Selection) Tick(msg AutoScrollMsg, panes []Pane) Result {
+	if msg.gen != s.autoGen || !s.dragging {
+		return Result{}
+	}
+	s.autoPending = false
+	return s.drag(s.lastX, s.lastY, panes)
+}
+
+type lazyFrame struct {
+	build func() string
+	done  bool
+	rows  []string
+}
+
+func (f *lazyFrame) lines() []string {
+	if !f.done {
+		f.done = true
+		if f.build != nil {
+			f.rows = strings.Split(f.build(), "\n")
+		}
+	}
+	return f.rows
+}
+
+func (s *Selection) press(msg tea.MouseMsg, panes []Pane, frame *lazyFrame, now time.Time) Result {
 	p, ok := paneAt(panes, msg.X, msg.Y)
 	s.active = false
+	s.stopAuto()
 	if !ok {
 		s.dragging = false
 		s.pressRuns = 0
@@ -158,18 +289,22 @@ func (s *Selection) press(msg tea.MouseMsg, panes []Pane, frame string, now time
 	}
 	s.lastAt, s.lastPane, s.lastCell = now, p.ID, cell
 	s.pane, s.anchor, s.focus = p.ID, cell, cell
+	s.lastX, s.lastY = msg.X, msg.Y
 	s.dragging, s.moved = true, false
 
 	if p.Kind != Text || s.pressRuns < 2 {
 		return Result{}
 	}
 	line := plainLine(p, cell.Row, frame)
-	lo, hi := 0, max(ansi.StringWidth(line)-1, 0)
+	var lo, hi int
+	var found bool
 	if s.pressRuns == 2 {
-		var found bool
-		if lo, hi, found = wordAt(line, cell.Col); !found {
-			return Result{Consumed: true}
-		}
+		lo, hi, found = wordAt(line, cell.Col)
+	} else {
+		lo, hi, found = lineSpan(line)
+	}
+	if !found {
+		return Result{Consumed: true}
 	}
 	s.anchor, s.focus = Point{cell.Row, lo}, Point{cell.Row, hi}
 	s.active, s.dragging = true, false
@@ -179,44 +314,66 @@ func (s *Selection) press(msg tea.MouseMsg, panes []Pane, frame string, now time
 	return Result{Consumed: true, Copy: s.text(panes, frame)}
 }
 
-func (s *Selection) drag(msg tea.MouseMsg, panes []Pane) Result {
+// drag moves the focus to the cell (x, y). Past the top or bottom of a pane
+// with Lines it scrolls one line and keeps the line that scrolled out.
+func (s *Selection) drag(x, y int, panes []Pane) Result {
 	p, ok := paneByID(panes, s.pane)
 	if !ok {
 		return Result{}
 	}
+	s.lastX, s.lastY = x, y
 	r := Result{Consumed: true}
-	y := msg.Y
 	if p.Lines != nil {
 		switch {
-		case msg.Y < p.Rect.Y && p.Offset > 0:
-			r.Scroll, r.ScrollPane = -1, p.ID
+		case y < p.Rect.Y && p.Offset > 0:
+			r.Scroll = -1
 			y = p.Rect.Y - 1
-		case msg.Y >= p.Rect.Y+p.Rect.H && p.Offset+p.Rect.H < len(p.Lines):
-			r.Scroll, r.ScrollPane = 1, p.ID
+		case y >= p.Rect.Y+p.Rect.H && p.Offset+p.Rect.H < len(p.Lines):
+			r.Scroll = 1
 			y = p.Rect.Y + p.Rect.H
 		}
+		if r.Scroll != 0 {
+			r.ScrollPane, r.Offset = p.ID, p.Offset+r.Scroll
+		}
 	}
-	focus := pointIn(p, msg.X, y)
-	if !s.moved && focus == s.anchor {
+	focus := pointIn(p, x, y)
+	if !s.moved && focus == s.anchor && r.Scroll == 0 {
 		return Result{}
 	}
 	s.focus, s.moved, s.active = focus, true, true
+	if r.Scroll != 0 && !s.autoPending {
+		s.autoPending = true
+		s.autoGen++
+		gen := s.autoGen
+		r.AutoScroll = tea.Tick(AutoScrollInterval, func(time.Time) tea.Msg { return AutoScrollMsg{gen: gen} })
+	}
 	return r
 }
 
-func (s *Selection) release(panes []Pane, frame string) Result {
+func (s *Selection) release(panes []Pane, frame *lazyFrame) Result {
 	s.dragging = false
+	s.stopAuto()
 	if !s.moved {
 		return Result{}
 	}
 	return Result{Consumed: true, Copy: s.text(panes, frame)}
 }
 
-// Text returns the selected text: lines joined with "\n", styles dropped,
-// trailing blanks trimmed per line, only the selection's pane's columns.
-func (s Selection) Text(panes []Pane, frame string) string { return s.text(panes, frame) }
+func (s *Selection) stopAuto() {
+	if s.autoPending {
+		s.autoPending = false
+		s.autoGen++
+	}
+}
 
-func (s Selection) text(panes []Pane, frame string) string {
+// Text returns the selected text: lines joined with "\n", styles dropped,
+// trailing blanks trimmed per line, only the selection's pane's columns, and
+// no kitty image placeholder cells. frame is View before Render.
+func (s Selection) Text(panes []Pane, frame string) string {
+	return s.text(panes, &lazyFrame{build: func() string { return frame }})
+}
+
+func (s Selection) text(panes []Pane, frame *lazyFrame) string {
 	id, a, b, ok := s.Range()
 	if !ok {
 		return ""
@@ -235,179 +392,7 @@ func (s Selection) text(panes []Pane, frame string) string {
 		if row == b.Row {
 			hi = b.Col
 		}
-		out = append(out, strings.TrimRight(ansi.Cut(line, lo, hi+1), " "))
+		out = append(out, strings.TrimRight(stripPlaceholders(ansi.Cut(line, lo, hi+1)), " "))
 	}
 	return strings.Join(out, "\n")
-}
-
-// Render draws the selection over frame (the View output) with style. It is
-// pure; call it at the end of View. Rows outside the pane's visible window
-// are skipped, and the selected cells lose their own colors for style's.
-func (s Selection) Render(frame string, panes []Pane, style lipgloss.Style) string {
-	id, a, b, ok := s.Range()
-	if !ok {
-		return frame
-	}
-	p, ok := paneByID(panes, id)
-	if !ok {
-		return frame
-	}
-	rows := strings.Split(frame, "\n")
-	for y := p.Rect.Y; y < p.Rect.Y+p.Rect.H && y < len(rows); y++ {
-		row := y - p.Rect.Y
-		if p.Lines != nil {
-			row += p.Offset
-		}
-		if row < a.Row || row > b.Row {
-			continue
-		}
-		lo, hi := 0, p.Rect.W-1
-		if row == a.Row {
-			lo = a.Col
-		}
-		if row == b.Row {
-			hi = b.Col
-		}
-		x := p.Rect.X + lo
-		cells := ansi.Strip(ansi.Cut(rows[y], x, p.Rect.X+hi+1))
-		if cells == "" {
-			continue
-		}
-		frame = render.Overlay(frame, style.Render(cells), x, y)
-	}
-	return frame
-}
-
-// CopiedMsg reports the result of Copy.
-type CopiedMsg struct {
-	Text string
-	Err  error
-}
-
-// Copy puts text on the clipboard off the UI thread. Locally it uses the
-// platform tool (pbcopy, wl-copy, xclip), which never writes to the terminal
-// the renderer is drawing on. Over SSH, or when no tool exists, it falls back
-// to OSC 52 on /dev/tty, as the engine does; tmux forwards it with
-// set-clipboard on.
-func Copy(text string) tea.Cmd {
-	if text == "" {
-		return nil
-	}
-	return func() tea.Msg {
-		return CopiedMsg{Text: text, Err: copyText(text)}
-	}
-}
-
-var clipboardTools = map[string][][]string{
-	"darwin": {{"pbcopy"}},
-	"linux":  {{"wl-copy"}, {"xclip", "-selection", "clipboard"}, {"xsel", "--clipboard", "--input"}},
-}
-
-func copyText(text string) error {
-	if os.Getenv("SSH_TTY") == "" && os.Getenv("SSH_CONNECTION") == "" {
-		for _, argv := range clipboardTools[runtime.GOOS] {
-			if _, err := exec.LookPath(argv[0]); err != nil {
-				continue
-			}
-			cmd := exec.Command(argv[0], argv[1:]...)
-			cmd.Stdin = strings.NewReader(text)
-			return cmd.Run()
-		}
-	}
-	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
-	if err != nil {
-		return err
-	}
-	defer tty.Close()
-	_, err = tty.WriteString(OSC52(text))
-	return err
-}
-
-// OSC52 is the clipboard-write escape for text.
-func OSC52(text string) string {
-	return "\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\a"
-}
-
-// wordChar is the engine's word class: letters, digits and the characters
-// paths and flags are made of, so a double click takes a whole path.
-var wordChar = regexp.MustCompile(`^[\p{L}\p{N}_/.\-+~\\]$`)
-
-// wordAt returns the cell columns of the word covering column col.
-func wordAt(line string, col int) (lo, hi int, ok bool) {
-	type cell struct {
-		r      string
-		lo, hi int
-	}
-	var cells []cell
-	x := 0
-	for _, r := range line {
-		w := max(ansi.StringWidth(string(r)), 1)
-		cells = append(cells, cell{string(r), x, x + w - 1})
-		x += w
-	}
-	at := -1
-	for i, c := range cells {
-		if col >= c.lo && col <= c.hi {
-			at = i
-			break
-		}
-	}
-	if at < 0 || !wordChar.MatchString(cells[at].r) {
-		return 0, 0, false
-	}
-	first, last := at, at
-	for first > 0 && wordChar.MatchString(cells[first-1].r) {
-		first--
-	}
-	for last < len(cells)-1 && wordChar.MatchString(cells[last+1].r) {
-		last++
-	}
-	return cells[first].lo, cells[last].hi, true
-}
-
-// plainLine is row of p without styles, as cells of the pane only.
-func plainLine(p Pane, row int, frame string) string {
-	if p.Lines != nil {
-		if row < 0 || row >= len(p.Lines) {
-			return ""
-		}
-		return ansi.Truncate(ansi.Strip(p.Lines[row]), p.Rect.W, "")
-	}
-	rows := strings.Split(frame, "\n")
-	y := p.Rect.Y + row
-	if y < 0 || y >= len(rows) {
-		return ""
-	}
-	return ansi.Strip(ansi.Cut(rows[y], p.Rect.X, p.Rect.X+p.Rect.W))
-}
-
-// pointIn maps a screen cell to a point of p, clamped to the pane: columns
-// never leave it (the engine's scope), rows stay within its lines.
-func pointIn(p Pane, x, y int) Point {
-	col := min(max(x-p.Rect.X, 0), max(p.Rect.W-1, 0))
-	row := y - p.Rect.Y
-	if p.Lines != nil {
-		row = min(max(row+p.Offset, 0), max(len(p.Lines)-1, 0))
-	} else {
-		row = min(max(row, 0), max(p.Rect.H-1, 0))
-	}
-	return Point{Row: row, Col: col}
-}
-
-func paneAt(panes []Pane, x, y int) (Pane, bool) {
-	for i := len(panes) - 1; i >= 0; i-- {
-		if panes[i].Rect.Contains(x, y) {
-			return panes[i], true
-		}
-	}
-	return Pane{}, false
-}
-
-func paneByID(panes []Pane, id string) (Pane, bool) {
-	for _, p := range panes {
-		if p.ID == id {
-			return p, true
-		}
-	}
-	return Pane{}, false
 }
