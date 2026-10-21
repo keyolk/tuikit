@@ -30,7 +30,9 @@ const DefaultDelay = 500 * time.Millisecond
 // m.saver, cmd = m.saver.FlushWith(m.uiState()) and quit on the Final Saved.
 //
 // The zero Saver (and one for app "") persists nothing: Save and Update are
-// no-ops and Flush reports Final at once. A model literal in a test, or an
+// no-ops and Flush and FlushWith report Saved{Final: true} at once. No Saver
+// returns tea.Quit itself, the zero one included: the app quits on the Final
+// Saved, so a test model built as a literal goes through the same quit path. A model literal in a test, or an
 // app run with persistence off, never writes $XDG_STATE_HOME/ui.json — which
 // is where app "" would otherwise land (brd, gcl).
 type Saver[T any] struct {

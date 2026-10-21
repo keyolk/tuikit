@@ -17,8 +17,17 @@
 //     and text selection on the panes never see a divider press.
 //   - Mouse events go to the split before selection.Update: a press on the
 //     divider is the split's (Result.Consumed), a press in a pane never is.
+//     The split's press clears the selection (Result.Pressed).
 //   - Keys are `>` grow, `<` shrink, `=` reset (Bindings); a double click on
 //     the divider resets too.
+//   - A split nobody has moved is unset (IsSet false): it follows Default,
+//     or DefaultFor of the area, and State persists nothing for it. Reset
+//     returns it to unset, so "follow the width rule until moved" needs no
+//     flag on the app's side.
+//
+// The zero Model is usable: two panes 50/50, each at least one cell, no
+// divider cell and so no mouse target (Grow, Shrink and Reset still work).
+// Give it a Divider, or GrabA/GrabB, for a drag.
 package split
 
 import (
@@ -73,16 +82,39 @@ type Model struct {
 	// Step is the fraction one key press moves the divider (DefaultStep
 	// when zero).
 	Step float64
+	// MaxA and MaxB cap each pane's size in cells; zero is no cap. A cap
+	// holds in Layout and in every write that knows the area (a list never
+	// wider than 70 columns, ccproxy). The minimums win over a cap, and when
+	// MaxA and MaxB cannot both hold, MaxA does and B takes the rest.
+	MaxA, MaxB int
 	// Grab widens the divider's press target by this many cells on each
 	// side, taking them from the panes for presses only (ccx grabbed ±1).
 	// Zero, the default, keeps every pane cell the pane's.
 	Grab int
+	// GrabA and GrabB widen the press target into A and into B only. When
+	// either is set, both are used and Grab is ignored: a zero-width
+	// divider (gcl's bottom split) is dragged by A's last row with GrabA 1
+	// and leaves B's first row to B. Grab n is GrabA n, GrabB n.
+	GrabA, GrabB int
 	// Default is the ratio Reset returns to (DefaultRatio when zero).
 	Default float64
+	// DefaultFor, when set, gives the ratio of an unset split laid out in
+	// an area, in place of Default: a ratio derived from the width ("a
+	// third, at most 52 columns", narwhal). It is clamped like any ratio,
+	// and an answer not strictly between 0 and 1 falls back to Default.
+	// Ratio, which has no area, still reports Default; use RatioIn.
+	//
+	// It is an interface so Model stays comparable with == (gcl and kkt
+	// compare against split.Model{}). A struct Defaulter keeps == working
+	// between two Models; DefaultFunc, a func, makes == between two Models
+	// that both hold one panic, so compare those with IsZero or by field.
+	DefaultFor Defaulter
 	// Lo and Hi bound the ratio (DefaultLo and DefaultHi when zero).
 	Lo, Hi float64
+	// Look is how DrawDivider draws the divider (LookLine when zero).
+	Look Look
 
-	ratio    float64 // 0 means Default
+	ratio    float64 // 0 means unset: Default, or DefaultFor(area)
 	dragging bool
 	grabOff  int // pointer offset inside the divider when the drag began
 	clicks   mouse.Clicks
@@ -93,8 +125,16 @@ type Result struct {
 	// Consumed: the event was the split's. Skip selection and the app's
 	// own click handling for it.
 	Consumed bool
-	// Changed: the ratio changed. Save prefs (State).
+	// Changed: the ratio, or whether it is set, changed. Save prefs (State).
 	Changed bool
+	// Pressed: the event was a left press the split took (a drag start or
+	// a double click). The selection never sees it, so clear it here:
+	// `if r.Pressed { m.sel.Clear() }`; otherwise its highlight stays over
+	// cells the resize is about to move.
+	Pressed bool
+	// Reset: the split was reset, by a double click on the divider or by
+	// ActionReset.
+	Reset bool
 }
 
 func (m Model) bounds() (lo, hi float64) {
@@ -121,7 +161,31 @@ func (m Model) def() float64 {
 	return m.clampBounds(d)
 }
 
-// Ratio is the fraction of the space after the divider that A gets.
+// Defaulter derives an unset split's ratio from the area it is laid out in.
+type Defaulter interface {
+	DefaultRatio(area mouse.Rect) float64
+}
+
+// DefaultFunc is a func as a Defaulter:
+//
+//	DefaultFor: split.DefaultFunc(func(r mouse.Rect) float64 { return 1.0 / 3 })
+type DefaultFunc func(area mouse.Rect) float64
+
+// DefaultRatio calls f.
+func (f DefaultFunc) DefaultRatio(area mouse.Rect) float64 { return f(area) }
+
+// defIn is the unset ratio in area: DefaultFor's when it gives a fraction.
+func (m Model) defIn(area mouse.Rect) float64 {
+	if m.DefaultFor != nil && area.W > 0 && area.H > 0 {
+		if d := m.DefaultFor.DefaultRatio(area); d > 0 && d < 1 {
+			return m.clampBounds(d)
+		}
+	}
+	return m.def()
+}
+
+// Ratio is the fraction of the space after the divider that A gets. For an
+// unset split it is Default; RatioIn also applies DefaultFunc.
 func (m Model) Ratio() float64 {
 	if m.ratio == 0 {
 		return m.def()
@@ -129,9 +193,42 @@ func (m Model) Ratio() float64 {
 	return m.clampBounds(m.ratio)
 }
 
+// RatioIn is Ratio for a split laid out in area: an unset split's ratio
+// comes from DefaultFor when there is one.
+func (m Model) RatioIn(area mouse.Rect) float64 {
+	if m.ratio == 0 {
+		return m.defIn(area)
+	}
+	return m.clampBounds(m.ratio)
+}
+
+// IsSet reports whether the ratio was chosen (a key, a drag, Set, Restore)
+// rather than left at the default. Reset clears it.
+func (m Model) IsSet() bool { return m.ratio != 0 }
+
+// IsZero reports whether m is the zero Model: no field set and no state.
+// An app whose models are built by a constructor can swap a struct-literal
+// zero split (a test model) for the constructor's.
+func (m Model) IsZero() bool {
+	// DefaultFor may hold a func, which == would panic on.
+	return m.Orientation == 0 && m.MinA == 0 && m.MinB == 0 && m.Divider == 0 &&
+		m.Collapse == 0 && m.Primary == 0 && m.Step == 0 && m.MaxA == 0 && m.MaxB == 0 &&
+		m.Grab == 0 && m.GrabA == 0 && m.GrabB == 0 && m.Default == 0 && m.DefaultFor == nil &&
+		m.Lo == 0 && m.Hi == 0 && m.Look == 0 &&
+		m.ratio == 0 && !m.dragging && m.grabOff == 0 && m.clicks == (mouse.Clicks{})
+}
+
 // Dragging reports whether a divider drag is in progress (draw the divider
 // highlighted).
 func (m Model) Dragging() bool { return m.dragging }
+
+// CancelDrag ends a drag in progress, keeping the ratio it reached: what a
+// release would do, for an app that loses the pointer (a focus change, an
+// overlay opening) and has no release to feed.
+func (m Model) CancelDrag() Model {
+	m.dragging = false
+	return m
+}
 
 func (m Model) size(r mouse.Rect) int {
 	if m.Orientation == Vertical {
@@ -145,7 +242,20 @@ func (m Model) size(r mouse.Rect) int {
 func (m Model) cells(r mouse.Rect) (lo, hi, avail int, ok bool) {
 	avail = m.size(r) - max(m.Divider, 0)
 	lo, hi = max(m.MinA, 1), avail-max(m.MinB, 1)
-	return lo, hi, avail, r.W > 0 && r.H > 0 && lo <= hi
+	ok = r.W > 0 && r.H > 0 && lo <= hi
+	if !ok {
+		return lo, hi, avail, false
+	}
+	// Caps narrow the range but never past the minimums, so they cannot
+	// collapse a split. When MaxA and MaxB cannot both hold, lo ends above
+	// hi; every caller clamps as min(max(x, lo), hi), so MaxA wins.
+	if m.MaxB > 0 {
+		lo = max(lo, avail-m.MaxB)
+	}
+	if m.MaxA > 0 {
+		hi = max(min(hi, m.MaxA), max(m.MinA, 1))
+	}
+	return lo, hi, avail, true
 }
 
 // Collapsed reports whether r shows only Primary: r is under Collapse, or
@@ -169,7 +279,7 @@ func (m Model) clampFor(v float64, r mouse.Rect) float64 {
 // sizeA is A's size in cells in r, for a split that is not collapsed.
 func (m Model) sizeA(r mouse.Rect) int {
 	lo, hi, avail, _ := m.cells(r)
-	return min(max(int(math.Round(m.Ratio()*float64(avail))), lo), hi)
+	return min(max(int(math.Round(m.RatioIn(r)*float64(avail))), lo), hi)
 }
 
 // Layout cuts r into pane A, the divider and pane B. The divider's cells are
@@ -208,8 +318,13 @@ func (m Model) Set(v float64, area mouse.Rect) Model {
 	return m
 }
 
-// Reset returns to Default, clamped for area.
-func (m Model) Reset(area mouse.Rect) Model { return m.Set(m.def(), area) }
+// Reset returns the split to unset: Default, or DefaultFunc of the area it
+// is laid out in, and nothing for State to persist. area is unused; it is
+// kept for the callers written when Reset stored the default.
+func (m Model) Reset(area mouse.Rect) Model {
+	m.ratio = 0
+	return m
+}
 
 // Grow moves the divider one Step toward B, at least one cell.
 func (m Model) Grow(area mouse.Rect) Model { return m.nudge(+1, area) }
@@ -234,5 +349,19 @@ func (m Model) nudge(dir int, area mouse.Rect) Model {
 	if next == cur {
 		next = cur + dir
 	}
-	return m.Set(float64(next)/float64(avail), area)
+	n := m.Set(float64(next)/float64(avail), area)
+	if n.sizeA(area) == cur {
+		// At a limit: leave an unset split unset rather than pin it to
+		// the ratio it already shows.
+		return m
+	}
+	return n
 }
+
+// state is what Changed compares: whether the ratio is set, and its value.
+type state struct {
+	set   bool
+	ratio float64
+}
+
+func (m Model) stateIn(area mouse.Rect) state { return state{m.IsSet(), m.RatioIn(area)} }
