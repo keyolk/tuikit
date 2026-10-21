@@ -49,9 +49,32 @@ func Divider(o Orientation, div mouse.Rect, st lipgloss.Style, dragging bool) st
 	return strings.Join(rows, "\n")
 }
 
-// DrawDivider is Divider for m's orientation and drag state.
+// Look is how DrawDivider draws the divider.
+type Look int
+
+const (
+	// LookLine draws the line always (Divider), heavy while dragging.
+	LookLine Look = iota
+	// LookBlank draws spaces while idle and the heavy line only while
+	// dragging: a blank column between bordered panes (ccproxy) that
+	// still shows where the drag is.
+	LookBlank
+)
+
+// DrawDivider is Divider for m's orientation and drag state, in m's Look.
 func (m Model) DrawDivider(div mouse.Rect, st lipgloss.Style) string {
+	if m.Look == LookBlank && !m.dragging {
+		return blank(div)
+	}
 	return Divider(m.Orientation, div, st, m.dragging)
+}
+
+// blank is div.H rows of div.W spaces.
+func blank(div mouse.Rect) string {
+	if div.W <= 0 || div.H <= 0 {
+		return ""
+	}
+	return strings.TrimSuffix(strings.Repeat(strings.Repeat(" ", div.W)+"\n", div.H), "\n")
 }
 
 // Join lays a, the divider and b out in r by Layout(r): each is cut and

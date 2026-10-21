@@ -24,6 +24,12 @@ func (r Rect) InsetStyle(st lipgloss.Style) Rect {
 	return r.Inset(top, right, bottom, left)
 }
 
+// Offset is r moved by dx columns and dy rows: a rect computed in a pane's
+// own coordinates placed on the screen (a body under a banner row).
+func (r Rect) Offset(dx, dy int) Rect {
+	return Rect{X: r.X + dx, Y: r.Y + dy, W: r.W, H: r.H}
+}
+
 // SplitTop cuts the first n rows off r: chrome (a banner, a tab bar) and the
 // body under it. n is clamped to r's height.
 func (r Rect) SplitTop(n int) (top, rest Rect) {

@@ -179,3 +179,31 @@ func TestSaverCopiesAreIndependent(t *testing.T) {
 		t.Fatal("Update on one copy changed the other's pending state")
 	}
 }
+
+// The zero Saver's FlushWith reports Saved{Final} like every other Saver and
+// never returns tea.Quit itself: the app quits on Final, one path for all.
+func TestZeroSaverFlushWithReportsFinal(t *testing.T) {
+	isolate(t)
+	for name, s := range map[string]Saver[any]{"zero": {}, "app \"\"": NewSaver[any]("", 0)} {
+		_, cmd := s.FlushWith(st{N: 1})
+		if cmd == nil {
+			t.Fatalf("%s: FlushWith returned no cmd", name)
+		}
+		msg := cmd()
+		if _, quit := msg.(tea.QuitMsg); quit {
+			t.Fatalf("%s: FlushWith returned tea.Quit; want Saved{Final}", name)
+		}
+		got, ok := msg.(Saved)
+		if !ok || !got.Final || got.Err != nil {
+			t.Fatalf("%s: FlushWith = %#v, want Saved{Final: true}", name, msg)
+		}
+		// Even a value that cannot be encoded: nothing is persisted, so
+		// nothing fails.
+		if _, cmd := s.FlushWith(func() {}); !run(t, cmd).Final {
+			t.Fatalf("%s: FlushWith(unencodable) not Final", name)
+		}
+	}
+	if _, err := os.Stat(Path("")); !os.IsNotExist(err) {
+		t.Fatalf("the zero Saver wrote %s", Path(""))
+	}
+}

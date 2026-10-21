@@ -54,3 +54,13 @@ func TestSplitTopAndBottom(t *testing.T) {
 		t.Fatalf("SplitTop past the height: %+v %+v", top, rest)
 	}
 }
+
+func TestRectOffset(t *testing.T) {
+	r := Rect{X: 1, Y: 2, W: 3, H: 4}.Offset(10, -1)
+	if r != (Rect{X: 11, Y: 1, W: 3, H: 4}) {
+		t.Fatalf("Offset = %+v", r)
+	}
+	if (Rect{}).Offset(5, 5).Contains(5, 5) {
+		t.Fatal("an offset zero Rect contains a point")
+	}
+}
