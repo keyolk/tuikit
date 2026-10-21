@@ -66,8 +66,8 @@ func TestWrapLeavesBadURLsAsPlainText(t *testing.T) {
 	if got := Wrap("https://x.io/\x1b\\x", "t"); got != "t" {
 		t.Fatalf("an escape in the URL must not reach the terminal: %q", got)
 	}
-	if got := Wrap("https://x.io/a", ""); ansi.Strip(got) != "https://x.io/a" {
-		t.Fatalf("empty text must show the URL, got %q", got)
+	if got := Wrap("https://x.io/a", ""); got != "" {
+		t.Fatalf("a label cut to nothing must stay empty, not become the URL: %q", got)
 	}
 }
 
@@ -132,5 +132,89 @@ func TestBindingResolvesO(t *testing.T) {
 	b, ok = km.Resolve([]keys.Ctx{"list"}, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ㅐ")}, keys.Opts{})
 	if !ok || b.Action != Action {
 		t.Fatalf("ㅐ resolved to %+v, %v", b, ok)
+	}
+}
+
+func TestANonASCIIURLDoesNotWidenTheLabel(t *testing.T) {
+	u := "https://x.io/한글-서비스?q=값"
+	got := Wrap(u, "ab")
+	for name, w := range map[string]int{
+		"render":   render.Width(got),
+		"lipgloss": lipgloss.Width(got),
+		"ansi":     ansi.StringWidth(got),
+		"pad":      render.Width(render.PadRight(got, 6)),
+	} {
+		want := 2
+		if name == "pad" {
+			want = 6
+		}
+		if w != want {
+			t.Errorf("%s width = %d, want %d: %q", name, w, want, got)
+		}
+	}
+	links := tuitest.Links(got)
+	if len(links) != 1 || links[0].Text != "ab" {
+		t.Fatalf("links %+v", links)
+	}
+	// Percent-encoded, it is the same URL to a browser.
+	if want := "https://x.io/%ED%95%9C%EA%B8%80-%EC%84%9C%EB%B9%84%EC%8A%A4?q=%EA%B0%92"; links[0].URL != want {
+		t.Fatalf("URL %q, want %q", links[0].URL, want)
+	}
+}
+
+func TestSpanLinksOnlyTheText(t *testing.T) {
+	got := Span("https://x.io/a", "● ", "title", "  2h")
+	links := tuitest.Links(got)
+	if len(links) != 1 || links[0].Text != "title" || ansi.Strip(got) != "● title  2h" {
+		t.Fatalf("got %q, links %+v", got, links)
+	}
+}
+
+func TestOpenFirstSaysHowManyAndSkipsBadURLs(t *testing.T) {
+	var got []string
+	old := Launcher
+	Launcher = func(u string) error { got = append(got, u); return nil }
+	t.Cleanup(func() { Launcher = old })
+
+	m := OpenFirst([]string{"javascript:x", "https://x.io/a", "https://x.io/b"})().(OpenedMsg)
+	if m.URL != "https://x.io/a" || m.Of != 2 || m.Err != nil {
+		t.Fatalf("got %+v", m)
+	}
+	if m.Note() != "opened https://x.io/a (the first of 2 links)" {
+		t.Fatalf("note %q", m.Note())
+	}
+	if !slices.Equal(got, []string{"https://x.io/a"}) {
+		t.Fatalf("launched %q", got)
+	}
+	one := OpenFirst([]string{"https://x.io/c"})().(OpenedMsg)
+	if one.Note() != "opened https://x.io/c" {
+		t.Fatalf("one link note %q", one.Note())
+	}
+	none := OpenFirst([]string{"file:///etc/passwd"})().(OpenedMsg)
+	if !errors.Is(none.Err, ErrNoLink) || none.Note() != "no link here" || none.Refused() {
+		t.Fatalf("no valid link: %+v %q", none, none.Note())
+	}
+	if len(got) != 2 {
+		t.Fatalf("launched %q", got)
+	}
+}
+
+func TestRefusedTellsAFilteredURLFromAFailedOne(t *testing.T) {
+	if !(OpenedMsg{Err: ErrInvalid}).Refused() || (OpenedMsg{Err: ErrRemote}).Refused() {
+		t.Fatal("Refused must be true only for ErrInvalid")
+	}
+}
+
+func TestNoteWithAnotherLanguage(t *testing.T) {
+	ko := Notes{Opened: "열기: %s", OpenedFirst: "열기: %s (링크 %d개 중 첫 번째)", Failed: "열기 실패: %s", None: "링크 없음"}
+	for m, want := range map[OpenedMsg]string{
+		{URL: "https://x.io/a"}:        "열기: https://x.io/a",
+		{URL: "https://x.io/a", Of: 3}: "열기: https://x.io/a (링크 3개 중 첫 번째)",
+		{Err: ErrRemote}:               "열기 실패: no local browser over SSH",
+		{Err: ErrNoLink}:               "링크 없음",
+	} {
+		if got := m.NoteWith(ko); got != want {
+			t.Errorf("%+v: %q, want %q", m, got, want)
+		}
 	}
 }

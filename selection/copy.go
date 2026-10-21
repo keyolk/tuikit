@@ -19,12 +19,19 @@ type CopiedMsg struct {
 }
 
 // Note is the toast text for the copy: "copied 12 chars" or the error.
-func (m CopiedMsg) Note() string {
+func (m CopiedMsg) Note() string { return m.NoteWith("copied %d chars", "copy failed: %s") }
+
+// NoteWith is Note in other words: copied gets the character count (%d),
+// failed the error (%s). A Korean UI passes "복사: %d자", "복사 실패: %s".
+func (m CopiedMsg) NoteWith(copied, failed string) string {
 	if m.Err != nil {
-		return "copy failed: " + m.Err.Error()
+		return fmt.Sprintf(failed, m.Err.Error())
 	}
-	return fmt.Sprintf("copied %d chars", utf8.RuneCountInString(m.Text))
+	return fmt.Sprintf(copied, m.Chars())
 }
+
+// Chars is how many characters were copied.
+func (m CopiedMsg) Chars() int { return utf8.RuneCountInString(m.Text) }
 
 // Clipboard writes text to the clipboard; Copy calls it. Tests replace it
 // so that running the command Update returned is safe and the copied text
