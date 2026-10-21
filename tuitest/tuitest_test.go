@@ -57,3 +57,15 @@ func TestReversed(t *testing.T) {
 		t.Fatalf("Reversed = %q, want %q", got, want)
 	}
 }
+
+func TestLinks(t *testing.T) {
+	frame := "a \x1b]8;;https://x.io/1\x1b\\one\x1b]8;;\x1b\\ b\n" +
+		"\x1b[1m\x1b]8;id=7;https://x.io/2\x07t\x1b[0mwo\x1b]8;;\x07\n" +
+		"\x1b]8;;https://x.io/3\x1b\\open at eol\n" +
+		"\x1b]2;title\x07plain"
+	got := Links(frame)
+	want := []Link{{0, "https://x.io/1", "one"}, {1, "https://x.io/2", "two"}, {2, "https://x.io/3", "open at eol"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Links = %+v\nwant    %+v", got, want)
+	}
+}

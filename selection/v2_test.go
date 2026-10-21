@@ -314,3 +314,36 @@ func TestRenderedHighlightMatchesTheCopyForAWideLine(t *testing.T) {
 		t.Fatalf("highlight %q, copy %q", got, r.Copy)
 	}
 }
+
+func TestNextTickStepsAnAutoScrollWithoutWaiting(t *testing.T) {
+	var s Selection
+	panes := func() []Pane { return panesFor(0) }
+	frame := func() string { return frameFor(0) }
+	if _, ok := s.NextTick(); ok {
+		t.Fatal("a tick before any drag")
+	}
+	s.Update(press(textX, 0), panes, frame, t0)
+	s.Update(motion(textX, textH+2), panes, frame, t0)
+	tick, ok := s.NextTick()
+	if !ok {
+		t.Fatal("no pending tick past the edge")
+	}
+	r, _ := s.Update(tick, func() []Pane { return panesFor(1) }, frame, t0)
+	if r.Offset != 2 {
+		t.Fatalf("NextTick's message scrolled to %d, want 2", r.Offset)
+	}
+	s.Update(release(textX, textH+2), panes, frame, t0)
+	if _, ok := s.NextTick(); ok {
+		t.Fatal("a tick after the release")
+	}
+}
+
+func TestCopiedNoteWith(t *testing.T) {
+	m := CopiedMsg{Text: "한글 ab"}
+	if got := m.NoteWith("복사: %d자", "복사 실패: %s"); got != "복사: 5자" || m.Chars() != 5 {
+		t.Fatalf("got %q", got)
+	}
+	if got := (CopiedMsg{Err: errors.New("no tty")}).NoteWith("복사: %d자", "복사 실패: %s"); got != "복사 실패: no tty" {
+		t.Fatalf("got %q", got)
+	}
+}

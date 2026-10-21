@@ -80,7 +80,9 @@ type Pane struct {
 	Kind Kind
 	// Lines is the pane's full content, styled or plain, one entry per line as
 	// drawn: after wrapping, never the source lines a wrap splits. Offset is
-	// the index of the line drawn at Rect.Y. A pane that sets Lines can be
+	// the index of the line drawn at Rect.Y: the offset on screen, after the
+	// app's own clamping, not a stored value that may run past the last page
+	// (a drag up from there would scroll lines nobody sees). A pane that sets Lines can be
 	// scrolled by a drag and keeps the lines that scroll out. A pane without
 	// Lines is read from the frame and cannot scroll.
 	//
@@ -128,6 +130,17 @@ type Result struct {
 // AutoScrollMsg is the tick behind Result.AutoScroll. Feed it to Update (or
 // Tick); a tick from an earlier drag is ignored.
 type AutoScrollMsg struct{ gen int }
+
+// NextTick is the AutoScrollMsg the pending auto-scroll tick will deliver,
+// without waiting AutoScrollInterval for it (tuitest.Drain's default wait is
+// no longer than the interval). Tests feed it back to step an auto-scroll;
+// ok is false when no tick is pending.
+func (s Selection) NextTick() (msg AutoScrollMsg, ok bool) {
+	if !s.autoPending {
+		return AutoScrollMsg{}, false
+	}
+	return AutoScrollMsg{gen: s.autoGen}, true
+}
 
 // AutoScrollInterval is how often a drag resting past a pane's edge scrolls
 // one more line.
