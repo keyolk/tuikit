@@ -229,6 +229,9 @@ type WindowOpts struct {
 // ID. target "" is the current session; a $session puts it there; a @window
 // or %pane inserts it right after that window (-a), since new-window -t
 // @window alone means "at that index" and fails because it is taken.
+//
+// A %pane is first resolved to its @window: tmux 3.8 rejects
+// new-window -a -t %pane with "can't specify pane here" (slx, 2026-10-23).
 func (c Client) NewWindow(ctx context.Context, target string, o WindowOpts) (string, error) {
 	args := []string{"new-window", "-d", "-P", "-F", "#{pane_id}"}
 	switch {
@@ -238,6 +241,16 @@ func (c Client) NewWindow(ctx context.Context, target string, o WindowOpts) (str
 	default:
 		if err := checkID(target, "@%"); err != nil {
 			return "", err
+		}
+		if strings.HasPrefix(target, "%") {
+			win, err := c.DisplayMessage(ctx, target, "#{window_id}")
+			if err != nil {
+				return "", err
+			}
+			if checkID(win, "@") != nil {
+				return "", fmt.Errorf("tmux display-message: unexpected window id %q for %s", win, target)
+			}
+			target = win
 		}
 		args = append(args, "-a", "-t", target)
 	}

@@ -210,6 +210,36 @@ func TestNewWindowArgvAndPlacement(t *testing.T) {
 	}
 }
 
+// A %pane target goes through its window: tmux rejects new-window -a -t %pane
+// with "can't specify pane here".
+func TestNewWindowResolvesPaneToWindow(t *testing.T) {
+	f := NewFake().On("display-message", "@7\n", nil).On("new-window", "%31\n", nil)
+	id, err := Client{Runner: f}.NewWindow(bg, "%5", WindowOpts{Name: "w"})
+	if err != nil || id != "%31" {
+		t.Fatalf("%q %v", id, err)
+	}
+	calls := f.Calls()
+	if want := []string{"display-message", "-p", "-t", "%5", "--", "#{window_id}"}; !reflect.DeepEqual(calls[0], want) {
+		t.Errorf("lookup:\n got %q\nwant %q", calls[0], want)
+	}
+	if want := []string{"new-window", "-d", "-P", "-F", "#{pane_id}", "-a", "-t", "@7", "-n", "w"}; !reflect.DeepEqual(calls[1], want) {
+		t.Errorf("new-window:\n got %q\nwant %q", calls[1], want)
+	}
+
+	// A pane that is gone, or an answer that is not a window id, opens nothing.
+	for _, r := range []Reply{{Err: errors.New("can't find pane: %5")}, {Out: "\n"}} {
+		f := NewFake().OnReply("display-message", r).On("new-window", "%32\n", nil)
+		if _, err := (Client{Runner: f}).NewWindow(bg, "%5", WindowOpts{}); err == nil {
+			t.Errorf("reply %+v: no error", r)
+		}
+		for _, c := range f.Calls() {
+			if c[0] == "new-window" {
+				t.Errorf("reply %+v: new-window ran: %q", r, c)
+			}
+		}
+	}
+}
+
 func TestCreatedRejectsUnexpectedOutput(t *testing.T) {
 	f := NewFake().On("split-window", "main:1.2\n", nil)
 	if _, err := (Client{Runner: f}).SplitWindow(bg, "%1", SplitOpts{}); err == nil {
